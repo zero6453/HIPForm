@@ -78,6 +78,22 @@ def test_limit_equality_survives_roundoff(plane):
     assert result["status"] == "within_limits_on_sampled_surface"
 
 
+@pytest.mark.parametrize("unused_input", ["angular_tolerance", "vertex"])
+def test_unused_inputs_do_not_relax_flat_tolerance(plane, unused_input):
+    points, triangles, tags = plane
+    settings = {}
+    if unused_input == "angular_tolerance":
+        settings["angular_mm"] = 1e15
+    else:
+        points = np.vstack((points, [1e15, 1e15, 1e15]))
+
+    result = compare(points, points + [0, 0, 11], triangles, tags, flat_mm=10, **settings)
+
+    assert result["global"]["max_mm"] == pytest.approx(11)
+    assert result["regions"]["flat"]["status"] == "exceeds_limits"
+    assert result["status"] == "exceeds_limits"
+
+
 def test_reverse_samples_use_nearest_reference_tag_instead_of_source_tag():
     first = np.array([[0., 0., 0.], [2., 0., 0.], [0., 2., 0.]])
     points = np.vstack([first, first + [30., 0., 0.]])

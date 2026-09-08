@@ -173,6 +173,17 @@ def test_non_step_upload_is_rejected(client):
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize("filename,content", [("capsule.txt", b"ISO-10303-21;"),
+                                             ("capsule.step", b""),
+                                             ("capsule.step", b"not STEP")])
+def test_invalid_second_upload_removes_partial_input_pair(client, app, solids, filename, content):
+    response = client.post("/api/inputs", files={
+        "cavity": ("cavity.step", Path(solids["cavity"]).read_bytes()),
+        "capsule": (filename, content)})
+    assert response.status_code == 422
+    assert not list((app.state.store.root / "inputs").iterdir())
+
+
 def test_interrupted_jobs_become_failed_after_restart(tmp_path):
     from hipform.api import create_app
     root = tmp_path / "api"
@@ -216,6 +227,21 @@ def test_solver_timeout_is_reported_and_process_reaped(tmp_path, solids):
 
 def test_cross_host_browser_requests_are_rejected(client):
     assert client.get("/api/configs/default", headers={"host": "untrusted.example"}).status_code == 400
+
+
+@pytest.mark.parametrize("origin", ["https://untrusted.example", "null"])
+def test_cross_origin_uploads_are_rejected_before_persistence(client, app, origin):
+    response = client.post("/api/inputs", headers={"origin": origin}, files={
+        role: (f"{role}.step", b"ISO-10303-21;\nEND-ISO-10303-21;")
+        for role in ("cavity", "capsule")})
+    assert response.status_code == 403
+    assert not list((app.state.store.root / "inputs").iterdir())
+
+
+def test_same_origin_swagger_can_save_configuration(client):
+    response = client.post("/api/configs", headers={"origin": "http://testserver"},
+                           json={"name": "Swagger", "config": config()})
+    assert response.status_code == 201
 
 
 @pytest.mark.parametrize("solver", [{"max_steps": 1}, {"time_step_s": 5e-324}])

@@ -73,7 +73,10 @@ def _surface_figure(mesh, result, comparison):
             line={"width": 5, "color": "#9d174d"}, hovertemplate="最大偏差位置<extra></extra>",
         ))
     count = len(figure.data)
-    visibility = lambda ref, pred: [ref, pred] + ([True] if count == 3 else [])
+
+    def visibility(reference, predicted):
+        return [reference, predicted] + ([True] if count == 3 else [])
+
     figure.update_layout(
         template="plotly_white", font={"family": "Arial, sans-serif", "size": 13},
         margin={"l": 0, "r": 0, "b": 85, "t": 60}, height=610,

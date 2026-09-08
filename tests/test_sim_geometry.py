@@ -8,7 +8,7 @@ import pytest
 np = pytest.importorskip("numpy")
 gmsh = pytest.importorskip("gmsh")
 
-from hipform import geometry
+from hipform import geometry  # noqa: E402 - optional CAD dependencies must be checked first
 
 
 def _assembly(tmp_path: Path, *, opening=False, overlap=False, top_gap=0, vent_height=0, presealed=False):
@@ -73,6 +73,21 @@ def test_overlapping_capsule_and_powder_are_rejected(tmp_path):
     cavity, capsule = _assembly(tmp_path, overlap=True)
     with pytest.raises(ValueError, match="overlap"):
         geometry.build_mesh(cavity, capsule, mesh_size_mm=3)
+
+
+@pytest.mark.parametrize("provenance", [[], {"capsule": []}])
+def test_cli_rejects_malformed_provenance_with_failure_report(tmp_path, provenance):
+    from hipform.cli import main
+
+    cavity, capsule = _assembly(tmp_path)
+    capsule.with_suffix(".provenance.json").write_text(json.dumps(provenance))
+    output = tmp_path / "run"
+    assert main(["mesh", "--cavity", str(cavity), "--capsule", str(capsule),
+                 "--output", str(output)]) == 2
+    result = json.loads((output / "result.json").read_text())
+    assert result["error_code"] == "invalid_geometry"
+    assert "provenance" in result["error"].lower()
+    assert (output / "report.html").is_file()
 
 
 def test_separated_powder_is_rejected_before_meshing(tmp_path, monkeypatch):

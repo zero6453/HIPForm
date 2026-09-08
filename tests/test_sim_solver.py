@@ -3,8 +3,7 @@
 import pytest
 
 np = pytest.importorskip("numpy")
-pytest.importorskip("skfem")
-from skfem import MeshTet
+MeshTet = pytest.importorskip("skfem").MeshTet
 
 
 def test_configuration_rejects_bad_cycles_and_nonfinite_values():

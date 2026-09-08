@@ -1,7 +1,6 @@
 """Conformal two-material meshing with an explicitly identified sealed exterior."""
 
 from contextlib import contextmanager
-import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -11,6 +10,7 @@ import gmsh
 import numpy as np
 
 from .errors import GeometryError
+from .inputs import file_info, load_provenance
 from .types import SimulationMesh
 
 
@@ -40,10 +40,6 @@ def _positive(value, name):
     if not np.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be finite and greater than zero.")
     return float(value)
-
-
-def _input_info(path):
-    return {"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
 def _import_solid(path, name):
@@ -97,8 +93,8 @@ def generate_example(cavity_step: Path, output_dir: Path, wall_mm: float = 3.0) 
             "description": "Synthetic sealed capsule for numerical demonstration; not the user's manufactured capsule",
             "minimum_bounding_box_clearance_mm": wall_mm,
             "cavity_volume_mm3": cavity_volume,
-            "source_cavity": _input_info(cavity_step),
-            "capsule": _input_info(output_capsule),
+            "source_cavity": file_info(cavity_step),
+            "capsule": file_info(output_capsule),
         }
         provenance_path.write_text(json.dumps(provenance, indent=2) + "\n")
     return {"cavity_step": output_cavity, "capsule_step": output_capsule, "provenance": provenance_path}
@@ -368,6 +364,8 @@ def build_mesh(
     with _model("HIP powder and capsule"):
         powder, powder_volume = _import_solid(cavity_step, "Cavity")
         capsule, capsule_volume = _import_solid(capsule_step, "Capsule")
+        inputs = {"cavity": file_info(cavity_step), "capsule": file_info(capsule_step)}
+        provenance = load_provenance(capsule_step, inputs["capsule"]["sha256"])
         if seal is not None:
             capsule = _apply_seal(capsule, seal)
             capsule_volume = float(gmsh.model.occ.getMass(*capsule))
@@ -443,7 +441,7 @@ def build_mesh(
         metadata = {
             "units": "mm",
             "step_unit_normalization": "OpenCASCADE imports STEP declared units into millimetres (Geometry.OCCTargetUnit=MM)",
-            "inputs": {"cavity": _input_info(cavity_step), "capsule": _input_info(capsule_step)},
+            "inputs": inputs,
             "mesh_size_mm": mesh_size_mm,
             "bounds_mm": [points.min(axis=0).tolist(), points.max(axis=0).tolist()],
             "synthetic_example": False,
@@ -464,11 +462,7 @@ def build_mesh(
             name: metadata["mesh_volume_mm3"][name] / metadata["cad_volume_mm3"][name] - 1
             for name in ("powder", "capsule")
         }
-        provenance_path = capsule_step.with_suffix(".provenance.json")
-        if provenance_path.is_file():
-            provenance = json.loads(provenance_path.read_text())
-            if provenance.get("capsule", {}).get("sha256") != metadata["inputs"]["capsule"]["sha256"]:
-                raise ValueError("Capsule provenance hash does not match the STEP file.")
+        if provenance is not None:
             metadata["synthetic_example"] = bool(provenance.get("synthetic_example"))
             metadata["provenance"] = provenance
     return SimulationMesh(points, tetrahedra, material, exterior[outer], powder_triangles, powder_face_ids, metadata)

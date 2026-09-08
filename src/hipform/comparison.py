@@ -178,8 +178,9 @@ def compare_surfaces(
     closest = np.concatenate((to_predicted, to_reference))
     tags = np.concatenate((reference_tags, predicted_tags))
     directions = np.array(["reference_to_predicted"] * reference_count + ["predicted_to_reference"] * predicted_count)
+    surface_nodes = np.unique(triangles)
     tolerance_epsilon = max(1e-9, np.finfo(float).eps * 64 * max(
-        float(np.abs(reference).max()), float(np.abs(predicted).max()), flat_mm, angular_mm))
+        float(np.abs(reference[surface_nodes]).max()), float(np.abs(predicted[surface_nodes]).max())))
     regions = {}
     is_angular = np.isin(tags, angular_ids)
     for name, mask, tolerance, region_ids in (

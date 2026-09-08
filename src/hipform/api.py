@@ -2,9 +2,7 @@
 
 from contextlib import asynccontextmanager
 from pathlib import Path
-import shutil
 from typing import Annotated, Literal
-import uuid
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -13,7 +11,8 @@ from pydantic import Field, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings, SimulationConfig
-from .jobs import ARTIFACTS, MAX_STEP_BYTES, JobStore, now, validate_step, write_json
+from .inputs import StepTooLarge
+from .jobs import JobStore
 
 
 class ConfigRequest(Settings):
@@ -109,6 +108,15 @@ def create_app(data_dir: Path | None = None, *, job_timeout_s=3600):
     app.state.store = store
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 
+    @app.middleware("http")
+    async def require_same_origin(request, call_next):
+        # HTML forms can send multipart uploads cross-origin without CORS permission.
+        origin = request.headers.get("origin")
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and origin is not None:
+            if origin != str(request.base_url).removesuffix("/"):
+                return JSONResponse(status_code=403, content={"detail": "Cross-origin writes are not allowed"})
+        return await call_next(request)
+
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
         # Rejected values can include infinities or exceptions, which are not JSON.
@@ -126,20 +134,9 @@ def create_app(data_dir: Path | None = None, *, job_timeout_s=3600):
         result = dict(job)
         base = f'/api/jobs/{job["id"]}'
         result["status_url"] = base
-        result["report_url"] = None
-        result["artifacts"] = {}
-        for name in sorted(ARTIFACTS):
-            if job["status"] != "completed" and name not in {"report.html", "result.json", "config.resolved.json", "run.log"}:
-                continue
-            if name in {"result.json", "report.html"} and job["status"] not in {"completed", "failed"}:
-                continue
-            try:
-                store.artifact(job["id"], name)
-            except KeyError:
-                continue
-            result["artifacts"][name] = f"{base}/artifacts/{name}"
-            if name == "report.html":
-                result["report_url"] = f"{base}/report"
+        artifacts = store.available_artifacts(job)
+        result["artifacts"] = {name: f"{base}/artifacts/{name}" for name in artifacts}
+        result["report_url"] = f"{base}/report" if "report.html" in artifacts else None
         return result
 
     @app.get("/", include_in_schema=False)
@@ -182,38 +179,15 @@ def create_app(data_dir: Path | None = None, *, job_timeout_s=3600):
 
     @app.post("/api/inputs", status_code=201, response_model=InputResponse, tags=["Inputs"],
               summary="Upload cavity.step and capsule.step (maximum 100 MiB each)")
-    async def upload_inputs(cavity: Annotated[UploadFile, File(description="Initial powder domain STEP")],
-                            capsule: Annotated[UploadFile, File(description="Capsule wall material STEP")]):
-        input_id = uuid.uuid4().hex
-        folder = store.root / "inputs" / input_id
-        folder.mkdir()
-        files = {"cavity": cavity, "capsule": capsule}
+    def upload_inputs(cavity: Annotated[UploadFile, File(description="Initial powder domain STEP")],
+                      capsule: Annotated[UploadFile, File(description="Capsule wall material STEP")]):
         try:
-            for role, upload in files.items():
-                if Path(upload.filename or "").suffix.lower() not in {".step", ".stp"}:
-                    raise ValueError("Both uploads must have .step or .stp extensions")
-                target = folder / f"{role}.step"
-                total = 0
-                with target.open("xb") as stream:
-                    while chunk := await upload.read(1024 * 1024):
-                        total += len(chunk)
-                        if total > MAX_STEP_BYTES:
-                            raise HTTPException(413, "Each STEP must be at most 100 MiB")
-                        stream.write(chunk)
-                validate_step(target)
-            record = {"id": input_id, "created_at": now(),
-                      "filenames": {role: Path(upload.filename).name for role, upload in files.items()}}
-            write_json(folder / "input.json", record)
-            return record
+            return store.save_inputs({role: (upload.filename or "", upload.file)
+                                      for role, upload in {"cavity": cavity, "capsule": capsule}.items()})
+        except StepTooLarge as exc:
+            raise HTTPException(413, str(exc)) from exc
         except (ValueError, OSError) as exc:
-            shutil.rmtree(folder)
             raise HTTPException(422, str(exc)) from exc
-        except BaseException:
-            shutil.rmtree(folder)
-            raise
-        finally:
-            for upload in files.values():
-                await upload.close()
 
     @app.post("/api/jobs", status_code=202, response_model=JobResponse, tags=["Simulations"],
               summary="Queue a simulation with STEP inputs and an explicit configuration source",
@@ -259,9 +233,10 @@ def create_app(data_dir: Path | None = None, *, job_timeout_s=3600):
     @app.get("/api/jobs/{job_id}/artifacts/{name}", response_class=FileResponse, tags=["Results"],
              summary="Download a generated model, configuration, numerical result or log")
     def artifact(job_id: str, name: str):
-        job = present(get_job(job_id))
-        if name not in job["artifacts"]:
-            raise HTTPException(404, "Artifact not available")
-        return FileResponse(store.artifact(job_id, name), filename=name)
+        try:
+            path = store.artifact(job_id, name)
+        except KeyError:
+            raise HTTPException(404, "Artifact not available") from None
+        return FileResponse(path, filename=name)
 
     return app

@@ -14,6 +14,8 @@ uv run --locked hipform serve --port 8000
 - 健康检查：<http://127.0.0.1:8000/health>
 
 这是供同机 CAD 项目调用的本地服务，仅绑定回环地址。远端部署的认证、TLS、访问控制及代理不在本版本中。
+浏览器写入请求必须来自服务自身的 Origin；外站与 `Origin: null` 的写入返回 403。
+Swagger 同源操作，以及不带 Origin 的 Python/HTTP 客户端调用可正常使用。
 默认数据目录为 `simulation-runs/api`，可用 `--data-dir` 设置绝对路径；默认单次求解超时 3600 秒，
 可用 `--job-timeout` 修改。每个数据目录只能启动一个服务，内部串行求解，避免多个 Gmsh 作业并发占用内存。
 

@@ -2,7 +2,6 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -10,19 +9,20 @@ import shutil
 import subprocess
 import sys
 import threading
+from typing import BinaryIO
 import uuid
 
 from filelock import FileLock, Timeout
 
 from .config import SimulationConfig
 from .failure_report import write_failure
+from .inputs import copy_step, load_provenance, validate_step
 
 
 ARTIFACTS = frozenset({"report.html", "result.json", "config.resolved.json", "mesh-info.json",
                       "comparison.json", "solver.json", "history.csv", "predicted-powder.stl",
                       "reference-powder.stl", "predicted-assembly.vtu", "initial-mesh.vtu",
                       "mesh.npz", "solution.npz", "run.log"})
-MAX_STEP_BYTES = 100 * 1024 * 1024
 
 
 def now():
@@ -47,18 +47,6 @@ def checked_id(value):
     if not re.fullmatch(r"[a-f0-9]{32}", value):
         raise KeyError(value)
     return value
-
-
-def validate_step(path):
-    path = Path(path).expanduser().resolve(strict=True)
-    if not path.is_file() or path.suffix.lower() not in {".step", ".stp"}:
-        raise ValueError("Input must be a regular .step or .stp file")
-    if not 0 < path.stat().st_size <= MAX_STEP_BYTES:
-        raise ValueError("STEP input must be between 1 byte and 100 MiB")
-    with path.open("rb") as stream:
-        if b"ISO-10303-21;" not in stream.read(4096).upper():
-            raise ValueError("Input is not an ISO-10303-21 STEP file")
-    return path
 
 
 class JobStore:
@@ -132,6 +120,38 @@ class JobStore:
     def list_configs(self):
         return [read_json(path) for path in sorted((self.root / "configs").glob("*.json"))]
 
+    def save_inputs(self, uploads: dict[str, tuple[str, BinaryIO]]) -> dict:
+        input_id = uuid.uuid4().hex
+        folder = self.root / "inputs" / input_id
+        folder.mkdir()
+        try:
+            filenames = {}
+            for role, (filename, stream) in uploads.items():
+                if Path(filename).suffix.lower() not in {".step", ".stp"}:
+                    raise ValueError("Both uploads must have .step or .stp extensions")
+                copy_step(stream, folder / f"{role}.step")
+                filenames[role] = Path(filename).name
+            record = {"id": input_id, "created_at": now(), "filenames": filenames}
+            write_json(folder / "input.json", record)
+            return record
+        except BaseException:
+            shutil.rmtree(folder)
+            raise
+
+    def _snapshot_inputs(self, sources: dict[str, Path], folder: Path) -> dict:
+        folder.mkdir()
+        snapshots = {}
+        for role, source in sources.items():
+            target = folder / f"{role}.step"
+            with source.open("rb") as stream:
+                digest = copy_step(stream, target)
+            snapshots[role] = {"source_path": str(source), "filename": source.name, "sha256": digest}
+            if role == "capsule":
+                provenance = load_provenance(source, digest)
+                if provenance is not None:
+                    write_json(target.with_suffix(".provenance.json"), provenance)
+        return snapshots
+
     def submit(self, request):
         with self.lock:
             if self.closing or self.executor is None:
@@ -152,29 +172,7 @@ class JobStore:
             folder = self.root / "jobs" / job_id
             folder.mkdir()
             try:
-                (folder / "inputs").mkdir()
-                snapshots = {}
-                for role, source in sources.items():
-                    target = folder / "inputs" / f"{role}.step"
-                    with source.open("rb") as incoming, target.open("xb") as outgoing:
-                        total = 0
-                        while chunk := incoming.read(1024 * 1024):
-                            total += len(chunk)
-                            if total > MAX_STEP_BYTES:
-                                raise ValueError("STEP input exceeds 100 MiB")
-                            outgoing.write(chunk)
-                    validate_step(target)
-                    snapshots[role] = {"source_path": str(source), "filename": source.name,
-                                       "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
-                    if role == "capsule" and source.with_suffix(".provenance.json").is_file():
-                        sidecar = source.with_suffix(".provenance.json")
-                        if sidecar.stat().st_size > 1024 * 1024:
-                            raise ValueError("Capsule provenance exceeds 1 MiB")
-                        provenance = read_json(sidecar)
-                        capsule_info = provenance.get("capsule") if isinstance(provenance, dict) else None
-                        if not isinstance(capsule_info, dict) or capsule_info.get("sha256") != snapshots[role]["sha256"]:
-                            raise ValueError("Capsule provenance hash does not match the STEP file")
-                        write_json(target.with_suffix(".provenance.json"), provenance)
+                snapshots = self._snapshot_inputs(sources, folder / "inputs")
                 resolved = config.model_dump(mode="json")
                 write_json(folder / "config.json", resolved)
                 job = {"id": job_id, "name": request.name, "status": "queued", "created_at": now(),
@@ -208,15 +206,21 @@ class JobStore:
         return sorted((read_json(path) for path in (self.root / "jobs").glob("*/job.json")),
                       key=lambda job: job["created_at"], reverse=True)
 
-    def artifact(self, job_id, name):
-        self.get_job(job_id)
-        if name not in ARTIFACTS:
-            raise KeyError(name)
-        folder = self.root / "jobs" / job_id
-        path = folder / "run.log" if name == "run.log" else folder / "run" / name
-        if path.is_symlink() or not path.is_file():
-            raise KeyError(name)
-        return path
+    def available_artifacts(self, job: dict) -> dict[str, Path]:
+        """Apply the result-visibility policy to one consistent job snapshot."""
+        allowed = ARTIFACTS if job["status"] == "completed" else {"config.resolved.json", "run.log"}
+        if job["status"] == "failed":
+            allowed = allowed | {"report.html", "result.json"}
+        folder = self.root / "jobs" / checked_id(job["id"])
+        artifacts = {}
+        for name in sorted(allowed):
+            path = folder / "run.log" if name == "run.log" else folder / "run" / name
+            if not path.is_symlink() and path.is_file():
+                artifacts[name] = path
+        return artifacts
+
+    def artifact(self, job_id: str, name: str) -> Path:
+        return self.available_artifacts(self.get_job(job_id))[name]
 
     def _run(self, job_id):
         folder = self.root / "jobs" / job_id
