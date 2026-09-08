@@ -26,7 +26,7 @@ Repository = "https://github.com/zero6453/HIPForm"
 Reports = "https://zero6453.github.io/HIPForm/"
 
 [dependency-groups]
-dev = ["pytest>=8.2,<9"]
+dev = ["pytest>=8.2,<9", "matplotlib>=3.9,<4"]
 
 [build-system]
 requires = ["hatchling"]
