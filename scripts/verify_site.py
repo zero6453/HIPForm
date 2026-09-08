@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from hipform.publishing import DOWNLOADS
+
 
 class Links(HTMLParser):
     def __init__(self):
@@ -25,8 +27,8 @@ def verify_site(site):
     if manifest.get("format") != "hipform-pages-v1":
         raise ValueError("Unknown publication format; export with hipform publish")
     names = manifest["files"]
-    if not {"index.html", "result.json", ".nojekyll"}.issubset(names):
-        raise ValueError("Publication is missing required files")
+    if set(names) != {"index.html", ".nojekyll", *DOWNLOADS}:
+        raise ValueError("Publication must contain exactly the HIPForm export files")
     actual = {path.name for path in site.iterdir()}
     if actual != {*names, "publication.json"}:
         raise ValueError("Publication has unexpected or missing files")
@@ -43,8 +45,8 @@ def verify_site(site):
         raise ValueError("Publication must contain a completed simulation")
     links = Links()
     links.feed((site / "index.html").read_text(encoding="utf-8"))
-    if any(target not in names for target in links.local):
-        raise ValueError("Report has a broken local download link")
+    if set(links.local) != set(DOWNLOADS):
+        raise ValueError("Report must link to every HIPForm download and no other local files")
     print(f"Verified {len(names)} publication files and {len(links.local)} download links")
 
 

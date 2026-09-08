@@ -1,4 +1,7 @@
 import json
+import hashlib
+import runpy
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -81,3 +84,31 @@ def test_publish_rejects_symlinked_artifact(completed_run, tmp_path):
     artifact.unlink()
     artifact.symlink_to(target)
     assert main(["publish", "--run", str(completed_run), "--output", str(tmp_path / "site")]) == 2
+
+
+@pytest.mark.parametrize("change", ["none", "extra", "missing", "changed_hash", "broken_link", "no_links"])
+def test_deployment_verifies_fixed_files_and_downloads(completed_run, tmp_path, change):
+    output = tmp_path / "site"
+    assert main(["publish", "--run", str(completed_run), "--output", str(output)]) == 0
+    manifest_path = output / "publication.json"
+    manifest = json.loads(manifest_path.read_text())
+    if change == "extra":
+        (output / "private.step").write_text("private geometry")
+        manifest["files"]["private.step"] = hashlib.sha256((output / "private.step").read_bytes()).hexdigest()
+    elif change == "missing":
+        (output / "history.csv").unlink()
+        del manifest["files"]["history.csv"]
+    elif change == "changed_hash":
+        (output / "history.csv").write_text("changed")
+    elif change in ("broken_link", "no_links"):
+        path = output / "index.html"
+        document = path.read_text().replace('href="history.csv"', 'href="missing.csv"')
+        path.write_text(document if change == "broken_link" else "<!doctype html><h1>Empty report</h1>")
+        manifest["files"]["index.html"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    verifier = runpy.run_path(str(Path(__file__).parents[1] / "scripts" / "verify_site.py"))["verify_site"]
+    if change == "none":
+        verifier(output)
+    else:
+        with pytest.raises(ValueError):
+            verifier(output)
