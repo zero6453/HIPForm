@@ -122,8 +122,21 @@ def _history_figure(result):
 def write_report(output_path: Path, mesh: SimulationMesh, result: SimulationResult,
                  comparison: dict, config: dict, *, downloads: dict | None = None) -> None:
     """Write offline plots and escaped provenance, settings, and sampled metrics."""
+    responsive_scene = """
+    const graph = document.getElementById('{plot_id}');
+    const narrow = window.matchMedia('(max-width: 600px)');
+    function frameScene() {
+        return Plotly.relayout(graph, {
+            height: narrow.matches ? 500 : 610,
+            'scene.camera.eye': narrow.matches ? {x: 2.5, y: 2.5, z: 1.9} : {x: 1.5, y: 1.5, z: 1.1}
+        });
+    }
+    narrow.addEventListener('change', frameScene);
+    return frameScene();
+    """
     surface = pio.to_html(_surface_figure(mesh, result, comparison), full_html=False,
                           include_plotlyjs=True, div_id="surface-plot",
+                          post_script=responsive_scene,
                           config={"responsive": True, "displaylogo": False})
     history = pio.to_html(_history_figure(result), full_html=False,
                           include_plotlyjs=False, div_id="history-plot",

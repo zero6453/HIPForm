@@ -11,4 +11,4 @@
 - [x] Implement report export, independent synthetic demo, and Pages deployment workflow.
 - [x] Run numerical tests and build; execute demo and inspect report output (64 tests passed; package built; 11 publication files and 9 download links verified).
 - [x] Review publication files; create public repository and push main.
-- [ ] Enable Pages, verify deployment and public report links.
+- [x] Enable Pages, verify deployment and public report links (Actions builds and deploys successfully; public page and all nine downloads return HTTP 200; desktop and mobile interaction checks pass).
