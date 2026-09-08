@@ -58,7 +58,9 @@ def _surface_figure(mesh, result, comparison):
         x=predicted[:, 0], y=predicted[:, 1], z=predicted[:, 2], **triangle_args,
         name="预测粉末终态", intensity=field, intensitymode="cell", cmin=0,
         cmax=max(float(comparison["global"]["max_mm"]), 1e-9), colorscale="YlOrRd",
-        colorbar={"title": "偏差 (mm)", "thickness": 16, "len": 0.75}, flatshading=True,
+        colorbar={"title": {"text": "偏差 (mm)", "side": "bottom"}, "orientation": "h",
+                  "thickness": 12, "len": 0.7, "x": 0.5, "xanchor": "center",
+                  "y": -0.08, "yanchor": "top"}, flatshading=True,
         hovertemplate="预测粉末终态<br>x=%{x:.2f} mm<br>y=%{y:.2f} mm<br>z=%{z:.2f} mm"
                       "<br>三角形采样最大偏差=%{intensity:.3f} mm<extra></extra>",
     ))
@@ -74,11 +76,12 @@ def _surface_figure(mesh, result, comparison):
     visibility = lambda ref, pred: [ref, pred] + ([True] if count == 3 else [])
     figure.update_layout(
         template="plotly_white", font={"family": "Arial, sans-serif", "size": 13},
-        margin={"l": 0, "r": 20, "b": 10, "t": 60}, height=610,
+        margin={"l": 0, "r": 0, "b": 85, "t": 60}, height=610,
         scene={"aspectmode": "data", "xaxis_title": "X (mm)", "yaxis_title": "Y (mm)",
                "zaxis_title": "Z (mm)", "camera": {"eye": {"x": 1.5, "y": 1.5, "z": 1.1}}},
         legend={"orientation": "h", "y": 1.01},
         updatemenus=[{"type": "buttons", "direction": "left", "x": 0, "y": 1.10,
+                     "xanchor": "left",
                      "buttons": [
                          {"label": "参考与预测叠加", "method": "restyle",
                           "args": [{"visible": visibility(True, True), "opacity": [0.25, 1., 1.][:count]}]},
@@ -110,8 +113,8 @@ def _history_figure(result):
     figure.update_yaxes(title_text="压力 (MPa)", row=2, col=1)
     figure.update_yaxes(title_text="相对密度", row=3, col=1)
     figure.update_xaxes(title_text="时间 (s)", row=3, col=1)
-    figure.update_layout(template="plotly_white", height=570, margin={"l": 65, "r": 20, "t": 35, "b": 50},
-                         legend={"orientation": "h", "y": 1.1},
+    figure.update_layout(template="plotly_white", height=620, margin={"l": 65, "r": 20, "t": 110, "b": 50},
+                         legend={"orientation": "h", "x": 0, "xanchor": "left", "y": 1.02, "yanchor": "bottom"},
                          font={"family": "Arial, sans-serif", "size": 13}, hovermode="x unified")
     return figure
 
