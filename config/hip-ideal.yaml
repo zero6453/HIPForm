@@ -1,0 +1,56 @@
+# IDEALIZED DEMO VALUES, NOT CALIBRATED TC4/20 STEEL MATERIAL DATA.
+schema_version: 1
+model: small_strain_thermoviscoelastic_densification_surrogate
+powder:
+  name: TC4 idealized powder (uncalibrated)
+  initial_relative_density: 0.65
+  limiting_relative_density: 0.995
+  solid_density_kg_per_mm3: 4.43e-06
+  young_modulus_mpa: 110000.0
+  hot_young_modulus_mpa: 45000.0
+  poisson_ratio: 0.34
+  density_stiffness_exponent: 3.0
+  thermal_expansion_per_k: 9.0e-06
+  reference_temperature_c: 920.0
+  reference_pressure_mpa: 100.0
+  densification_rate_per_s: 0.0006
+  activation_energy_j_per_mol: 150000.0
+  pressure_exponent: 1.5
+capsule:
+  name: 20 steel idealized Maxwell solid (uncalibrated)
+  young_modulus_mpa: 200000.0
+  hot_young_modulus_mpa: 25000.0
+  poisson_ratio: 0.3
+  thermal_expansion_per_k: 1.4e-05
+  reference_temperature_c: 920.0
+  hot_relaxation_time_s: 60.0
+  relaxation_activation_energy_j_per_mol: 180000.0
+solver:
+  mesh_size_mm: 6.0
+  time_step_s: 120.0
+  max_steps: 1000
+  strain_warning_threshold: 0.05
+  linear_residual_tolerance: 1.0e-06
+tolerances:
+  flat_mm: 10.0
+  angular_mm: 20.0
+  angular_face_ids: []
+  sample_spacing_mm: 3.0
+  max_samples: 200000
+cycle:
+- time_s: 0.0
+  temperature_c: 20.0
+  pressure_mpa: 0.0
+- time_s: 3600.0
+  temperature_c: 920.0
+  pressure_mpa: 100.0
+- time_s: 10800.0
+  temperature_c: 920.0
+  pressure_mpa: 100.0
+- time_s: 14400.0
+  temperature_c: 200.0
+  pressure_mpa: 100.0
+- time_s: 16200.0
+  temperature_c: 20.0
+  pressure_mpa: 0.0
+seal: null

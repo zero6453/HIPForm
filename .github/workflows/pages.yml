@@ -1,0 +1,63 @@
+name: Publish Report
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.9"
+          enable-cache: true
+      - name: Install native mesh dependency
+        run: sudo apt-get update && sudo apt-get install -y libglu1-mesa
+      - name: Install locked Python dependencies
+        run: uv sync --locked
+      - name: Test simulation and publication
+        run: uv run --locked pytest -q
+      - name: Build Python package
+        run: uv build
+      - name: Build report
+        shell: bash
+        run: |
+          if [ -d reports/latest ]; then
+            cp -R reports/latest site
+          else
+            uv run --locked python scripts/run_demo.py
+            uv run --locked hipform publish --run simulation-runs/public-demo/run --output site
+          fi
+      - name: Verify publication
+        run: uv run --locked python scripts/verify_site.py site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
