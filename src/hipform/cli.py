@@ -51,15 +51,17 @@ def _export_result(output, mesh, result):
 def _run(args):
     from .geometry import build_mesh
 
-    config = load_config(args.config)
     output = args.output.resolve()
-    if output.exists() and any(output.iterdir()):
+    if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError(f"Output directory is not empty: {output}; choose a new run directory")
     output.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    payload = config.model_dump(mode="json")
-    _json(output / "config.resolved.json", payload)
+    stage = "configuration"
     try:
+        config = load_config(args.config)
+        payload = config.model_dump(mode="json")
+        _json(output / "config.resolved.json", payload)
+        stage = "geometry"
         print("Preparing conformal capsule/powder mesh...", flush=True)
         mesh = build_mesh(args.cavity, args.capsule, config.solver.mesh_size_mm,
                           config.seal.model_dump() if config.seal else None)
@@ -81,8 +83,10 @@ def _run(args):
                       f"{row['pressure_mpa']:.1f} MPa, mean relative density {row['mean_relative_density']:.4f}", flush=True)
                 last_update[0] = now
 
+        stage = "solver"
         result = simulate(mesh, config, progress)
         _export_result(output, mesh, result)
+        stage = "comparison"
         tolerance = config.tolerances
         comparison = compare_surfaces(mesh.points, mesh.points + result.displacement,
             mesh.powder_triangles, mesh.powder_face_ids, flat_mm=tolerance.flat_mm,
@@ -91,6 +95,7 @@ def _run(args):
         _json(output / "comparison.json", comparison)
         _json(output / "solver.json", {"metadata": result.metadata, "warnings": result.warnings,
                                       "history": result.history})
+        stage = "report"
         write_report(output / "report.html", mesh, result, comparison, payload)
         summary = {"execution_status": "completed", "calibrated": False,
             "engineering_acceptance": "not_assessed", "model_validity": result.metadata["model_validity"],
@@ -108,14 +113,24 @@ def _run(args):
         print(f"Sampled tolerance: {comparison['status']}; engineering acceptance: not assessed")
         return 0
     except Exception as exc:
-        _json(output / "result.json", {"execution_status": "failed", "engineering_acceptance": "not_assessed",
-            "error": str(exc), "elapsed_s": round(time.monotonic()-started, 2)})
+        from .failure_report import write_failure
+        code = getattr(exc, "code", {"configuration": "invalid_configuration",
+                                    "geometry": "invalid_geometry"}.get(stage, "simulation_failed"))
+        write_failure(output, error=str(exc), error_code=code,
+                      details=getattr(exc, "details", {}), stage=stage,
+                      elapsed_s=time.monotonic() - started)
         raise
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="HIPForm: configurable uncalibrated HIP approximation (mm/MPa/s)")
     commands = parser.add_subparsers(dest="command", required=True)
+    serve = commands.add_parser("serve", help="Start the local HTTP API and Swagger UI")
+    serve.add_argument("--host", default="127.0.0.1", choices=["127.0.0.1", "localhost"])
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--data-dir", type=Path, default=Path("simulation-runs/api"))
+    serve.add_argument("--job-timeout", type=float, default=3600,
+                       help="Maximum seconds per solver process (default: 3600)")
     publish = commands.add_parser("publish", help="Export a completed run for GitHub Pages")
     publish.add_argument("--run", type=Path, required=True)
     publish.add_argument("--output", type=Path, required=True)
@@ -133,6 +148,13 @@ def main(argv=None) -> int:
         command.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
+        if args.command == "serve":
+            from .api import create_app
+            import uvicorn
+            if not 1 <= args.port <= 65535 or not 0 < args.job_timeout < float("inf"):
+                raise ValueError("port must be 1-65535 and job-timeout must be positive and finite")
+            uvicorn.run(create_app(args.data_dir, job_timeout_s=args.job_timeout), host=args.host, port=args.port)
+            return 0
         if args.command == "publish":
             from .publishing import publish_run
             print(f"Pages report: {publish_run(args.run, args.output).resolve()}")

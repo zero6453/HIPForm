@@ -12,6 +12,15 @@ HIPForm 接收包套材料实体 STEP 和已补偿型腔 STEP，输出 TC4 粉�
 
 Python 3.12+ and [uv](https://docs.astral.sh/uv/) are required. On Ubuntu, install `libglu1-mesa` for Gmsh first.
 
+CAD 生成后可通过本机 HTTP API 提交 STEP 和工艺配置，查询状态并打开报告：
+
+```bash
+uv sync --locked
+uv run --locked hipform serve --port 8000
+```
+
+Swagger：<http://127.0.0.1:8000/docs>。配置、上传、异步求解及报告接口见 [API 使用说明](docs/api.md)。
+
 ```bash
 uv sync --locked
 uv run hipform run \
@@ -49,6 +58,8 @@ uv run hipform publish --run simulation-runs/actual-001 --output site
 
 ## Documentation
 
+- [HTTP API、Swagger 与工艺参数配置](docs/api.md)
+- [CadQuery 输出接入、自动调用与报告查看](docs/cadquery-integration.zh-CN.md)
 - [模型、配置与公差定义](docs/simulation.md)
 - [GitHub Pages 部署与更新](docs/pages.md)
 

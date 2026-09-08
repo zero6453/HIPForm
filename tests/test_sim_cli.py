@@ -27,6 +27,10 @@ def test_failed_mesh_records_failure_without_false_acceptance(tmp_path):
     result = json.loads((output / "result.json").read_text())
     assert result["execution_status"] == "failed"
     assert result["engineering_acceptance"] == "not_assessed"
+    assert result["error_code"] == "invalid_geometry"
+    report = (output / "report.html").read_text()
+    assert "failed" in report
+    assert "missing.step" in report
 
 
 def test_malformed_yaml_produces_readable_error(tmp_path, capsys):
@@ -36,3 +40,26 @@ def test_malformed_yaml_produces_readable_error(tmp_path, capsys):
     assert main(["run", "--cavity", "absent.step", "--capsule", "absent.step",
                  "--config", str(path), "--output", str(tmp_path / "out")]) == 2
     assert "YAML" in capsys.readouterr().err
+    result = json.loads((tmp_path / "out" / "result.json").read_text())
+    assert result["error_code"] == "invalid_configuration"
+    assert (tmp_path / "out" / "report.html").is_file()
+
+
+def test_failed_run_does_not_overwrite_existing_artifacts(tmp_path):
+    from hipform.cli import main
+    output = tmp_path / "run"
+    output.mkdir()
+    (output / "report.html").write_text("existing report")
+    assert main(["run", "--cavity", "missing.step", "--capsule", "missing.step",
+                 "--output", str(output)]) == 2
+    assert (output / "report.html").read_text() == "existing report"
+
+
+def test_failure_report_escapes_untrusted_input(tmp_path):
+    from hipform.cli import main
+    output = tmp_path / "run"
+    assert main(["run", "--cavity", "<script>alert(1)</script>.step",
+                 "--capsule", "missing.step", "--output", str(output)]) == 2
+    report = (output / "report.html").read_text()
+    assert "&lt;script&gt;" in report
+    assert "<script>alert(1)</script>" not in report

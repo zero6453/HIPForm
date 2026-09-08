@@ -11,7 +11,7 @@ gmsh = pytest.importorskip("gmsh")
 from hipform import geometry
 
 
-def _assembly(tmp_path: Path, *, opening=False, overlap=False):
+def _assembly(tmp_path: Path, *, opening=False, overlap=False, top_gap=0, vent_height=0, presealed=False):
     cavity = tmp_path / "cavity.step"
     capsule = tmp_path / "capsule.step"
     gmsh.initialize()
@@ -24,10 +24,14 @@ def _assembly(tmp_path: Path, *, opening=False, overlap=False):
         gmsh.model.add("capsule")
         outer = gmsh.model.occ.addBox(-6, -6, -6, 12, 12, 12)
         if not overlap:
-            inner = gmsh.model.occ.addBox(-5, -5, -5, 10, 10, 10)
+            inner = gmsh.model.occ.addBox(-5, -5, -5, 10, 10, 10 + top_gap)
             shell, _ = gmsh.model.occ.cut([(3, outer)], [(3, inner)])
+            if vent_height:
+                tube = gmsh.model.occ.addCylinder(0, 0, 5.5, 0, 0, vent_height + 0.5, 2)
+                shell, _ = gmsh.model.occ.fuse(shell, [(3, tube)])
             if opening:
-                bore = gmsh.model.occ.addCylinder(0, 0, 5, 0, 0, 2, 1)
+                bore_height = 1 + vent_height - 0.5 if presealed else 2 + vent_height
+                bore = gmsh.model.occ.addCylinder(0, 0, 5, 0, 0, bore_height, 1)
                 gmsh.model.occ.cut(shell, [(3, bore)])
         gmsh.model.occ.synchronize()
         gmsh.write(str(capsule))
@@ -71,10 +75,162 @@ def test_overlapping_capsule_and_powder_are_rejected(tmp_path):
         geometry.build_mesh(cavity, capsule, mesh_size_mm=3)
 
 
+def test_separated_powder_is_rejected_before_meshing(tmp_path, monkeypatch):
+    cavity, capsule = _assembly(tmp_path)
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.occ.addBox(-4, -4, -4, 8, 8, 8)
+        gmsh.model.occ.synchronize()
+        gmsh.write(str(cavity))
+    finally:
+        gmsh.finalize()
+
+    def no_meshing(*args):
+        pytest.fail("Disconnected solids should be rejected before mesh generation")
+
+    monkeypatch.setattr(gmsh.model.mesh, "generate", no_meshing)
+    with pytest.raises(ValueError, match="Assembly contains disconnected material bodies in the mesh") as error:
+        geometry.build_mesh(cavity, capsule, mesh_size_mm=3)
+    assert error.value.code == "material_gap"
+    assert error.value.details["minimum_gap_mm"] == pytest.approx(1)
+
+
 def test_open_capsule_exposes_powder_and_is_rejected(tmp_path):
     cavity, capsule = _assembly(tmp_path, opening=True)
     with pytest.raises(ValueError, match="(?i)(exposed|open|exterior)"):
         geometry.build_mesh(cavity, capsule, mesh_size_mm=2)
+
+
+def test_open_vent_is_rejected_at_cad_stage_even_with_coarse_mesh(tmp_path, monkeypatch):
+    from hipform.errors import GeometryError
+
+    cavity, capsule = _assembly(tmp_path, opening=True, vent_height=5)
+
+    def unexpected_mesh(*args, **kwargs):
+        pytest.fail("An open CAD vent must be rejected before mesh generation")
+
+    monkeypatch.setattr(gmsh.model.mesh, "generate", unexpected_mesh)
+    with pytest.raises(GeometryError, match="Powder is exposed") as error:
+        geometry.build_mesh(cavity, capsule, mesh_size_mm=40)
+    assert error.value.code == "open_capsule"
+
+
+def test_partial_powder_wall_gap_is_rejected_before_meshing(tmp_path, monkeypatch):
+    from hipform.errors import GeometryError
+
+    cavity, capsule = _assembly(tmp_path, top_gap=0.5)
+
+    def unexpected_mesh(*args, **kwargs):
+        pytest.fail("A partial material gap must be rejected before mesh generation")
+
+    monkeypatch.setattr(gmsh.model.mesh, "generate", unexpected_mesh)
+    with pytest.raises(GeometryError) as error:
+        geometry.build_mesh(cavity, capsule, mesh_size_mm=2)
+    assert error.value.code == "material_gap"
+    assert str(error.value) == "Assembly contains disconnected material bodies in the mesh."
+
+
+def test_presealed_vent_residual_space_is_allowed_without_an_added_seal(tmp_path):
+    cavity, capsule = _assembly(tmp_path, opening=True, vent_height=3, presealed=True)
+    mesh = geometry.build_mesh(cavity, capsule, mesh_size_mm=2)
+    assert mesh.metadata["seal"] is None
+    assert mesh.metadata["unloaded_boundary_components"] == 1
+    vents = mesh.metadata["sealed_vent_voids"]
+    assert len(vents) == 1
+    assert vents[0]["radius_mm"] == pytest.approx(1)
+    assert vents[0]["height_mm"] == pytest.approx(3.5)
+
+
+def test_presealed_vent_can_be_rotated_with_the_input_assembly(tmp_path):
+    cavity, capsule = _assembly(tmp_path, opening=True, vent_height=3, presealed=True)
+    for path in (cavity, capsule):
+        gmsh.initialize()
+        try:
+            gmsh.option.setNumber("General.Terminal", 0)
+            solids = gmsh.model.occ.importShapes(str(path))
+            gmsh.model.occ.rotate(solids, 0, 0, 0, 0, 1, 0, np.pi / 2)
+            gmsh.model.occ.synchronize()
+            gmsh.write(str(path))
+        finally:
+            gmsh.finalize()
+    mesh = geometry.build_mesh(cavity, capsule, mesh_size_mm=2)
+    assert mesh.metadata["sealed_vent_voids"][0]["axis"] == pytest.approx([1, 0, 0], abs=1e-10)
+
+
+def test_annular_powder_clearance_is_not_a_sealed_vent(tmp_path):
+    from hipform.errors import GeometryError
+
+    cavity, capsule = tmp_path / "cavity.step", tmp_path / "capsule.step"
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("powder")
+        gmsh.model.occ.addCylinder(0, 0, -5, 0, 0, 10, 4)
+        gmsh.model.occ.synchronize()
+        gmsh.write(str(cavity))
+        gmsh.model.add("capsule")
+        outer = gmsh.model.occ.addCylinder(0, 0, -6, 0, 0, 12, 6)
+        inner = gmsh.model.occ.addCylinder(0, 0, -5, 0, 0, 10, 5)
+        gmsh.model.occ.cut([(3, outer)], [(3, inner)])
+        gmsh.model.occ.synchronize()
+        gmsh.write(str(capsule))
+    finally:
+        gmsh.finalize()
+    with pytest.raises(GeometryError) as error:
+        geometry.build_mesh(cavity, capsule, mesh_size_mm=2)
+    assert error.value.code == "material_gap"
+    assert error.value.details["gap_type"] == "partial_interface_gap"
+
+
+def test_cylindrical_powder_end_clearance_is_not_a_vent(tmp_path):
+    from hipform.errors import GeometryError
+
+    cavity, capsule = tmp_path / "cavity.step", tmp_path / "capsule.step"
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("powder")
+        gmsh.model.occ.addCylinder(0, 0, -5, 0, 0, 10, 4)
+        gmsh.model.occ.synchronize()
+        gmsh.write(str(cavity))
+        gmsh.model.add("capsule")
+        outer = gmsh.model.occ.addCylinder(0, 0, -6, 0, 0, 12, 5)
+        inner = gmsh.model.occ.addCylinder(0, 0, -5, 0, 0, 10.5, 4)
+        gmsh.model.occ.cut([(3, outer)], [(3, inner)])
+        gmsh.model.occ.synchronize()
+        gmsh.write(str(capsule))
+    finally:
+        gmsh.finalize()
+    with pytest.raises(GeometryError) as error:
+        geometry.build_mesh(cavity, capsule, mesh_size_mm=2)
+    assert error.value.code == "material_gap"
+
+
+def test_circular_blind_wall_pocket_is_not_a_vent(tmp_path):
+    from hipform.errors import GeometryError
+
+    cavity, capsule = _assembly(tmp_path, opening=True, presealed=True)
+    with pytest.raises(GeometryError) as error:
+        geometry.build_mesh(cavity, capsule, mesh_size_mm=2)
+    assert error.value.code == "material_gap"
+
+
+def test_void_within_capsule_material_is_not_a_powder_gap(tmp_path):
+    cavity, capsule = _assembly(tmp_path)
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        solids = gmsh.model.occ.importShapes(str(capsule))
+        void = gmsh.model.occ.addSphere(5.5, 0, 0, 0.2)
+        gmsh.model.occ.cut(solids, [(3, void)])
+        gmsh.model.occ.synchronize()
+        gmsh.write(str(capsule))
+    finally:
+        gmsh.finalize()
+    mesh = geometry.build_mesh(cavity, capsule, mesh_size_mm=1)
+    assert mesh.metadata["unloaded_boundary_components"] == 1
+    assert mesh.metadata["sealed_vent_voids"] == []
 
 
 def test_explicit_seal_closes_opening_and_keeps_internal_vacuum_unloaded(tmp_path):

@@ -10,11 +10,15 @@ import threading
 import gmsh
 import numpy as np
 
+from .errors import GeometryError
 from .types import SimulationMesh
 
 
 _GMSH_LOCK = threading.RLock()
 _TET_FACES = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]])
+_CAD_TOLERANCE_MM = 1e-7
+_MATERIAL_GAP_MESSAGE = "Assembly contains disconnected material bodies in the mesh."
+_OPEN_CAPSULE_MESSAGE = "Powder is exposed on the exterior boundary: the capsule is open or the explicit seal is ineffective."
 
 
 @contextmanager
@@ -122,6 +126,143 @@ def _overlap_volume(first, second):
     if common:
         gmsh.model.occ.remove(common, recursive=True)
     return float(overlap)
+
+
+def _cad_boundary_components(surfaces):
+    edges = {}
+    for index, tag in enumerate(surfaces):
+        for dim, edge in gmsh.model.getBoundary([(2, tag)], combined=False, oriented=False):
+            # Sphere/cone poles can have degenerate edges belonging to one face.
+            if dim == 1 and gmsh.model.occ.getMass(1, edge) > _CAD_TOLERANCE_MM:
+                edges.setdefault(edge, []).append(index)
+    if any(len(owners) != 2 for owners in edges.values()):
+        raise GeometryError("The CAD assembly boundary is open or non-manifold; a sealed pressure exterior cannot be identified.")
+    labels = _components(len(surfaces), list(edges.values()))
+    return [[surfaces[index] for index in np.flatnonzero(labels == label)] for label in np.unique(labels)]
+
+
+def _vent_tube_exterior(exterior, base, axis, radius, height, tolerance):
+    """Find a coaxial outer tube attached through an inner rim of a wall face."""
+    planar = {tag: gmsh.model.getBoundary([(2, tag)], combined=True, oriented=False)
+              for tag in exterior if gmsh.model.getType(2, tag) == "Plane"}
+    for tag in exterior:
+        if gmsh.model.getType(2, tag) != "Cylinder":
+            continue
+        rims = gmsh.model.getBoundary([(2, tag)], combined=True, oriented=False)
+        if len(rims) != 2 or any(gmsh.model.getType(*rim) != "Circle" for rim in rims):
+            continue
+        radii = [gmsh.model.occ.getMass(*rim) / (2 * np.pi) for rim in rims]
+        if radii[0] <= radius + tolerance or not np.isclose(*radii, rtol=1e-7):
+            continue
+        centers = np.asarray([gmsh.model.occ.getCenterOfMass(*rim) for rim in rims])
+        positions = (centers - base) @ axis
+        if np.any(np.linalg.norm(centers - base - positions[:, None] * axis, axis=1) > tolerance):
+            continue
+        if positions.min() > height + tolerance or positions.max() < height - tolerance:
+            continue
+        for rim, position in zip(rims, positions, strict=True):
+            if position <= tolerance or position > height + tolerance:
+                continue
+            rim_box = np.asarray(gmsh.model.occ.getBoundingBox(*rim))
+            for face, boundaries in planar.items():
+                if rim not in boundaries or len(boundaries) < 2:
+                    continue
+                face_box = np.asarray(gmsh.model.occ.getBoundingBox(2, face))
+                if (np.all(face_box[:3] <= rim_box[:3] + tolerance) and
+                        np.all(face_box[3:] >= rim_box[3:] - tolerance) and
+                        np.any(face_box[3:] - face_box[:3] > rim_box[3:] - rim_box[:3] + tolerance)):
+                    return {"outer_cylinder_face_id": tag, "outer_radius_mm": float(radii[0]),
+                            "neck_face_id": face}
+    return None
+
+
+def _sealed_cylindrical_void(component, powder_surfaces, bonded_surfaces, exterior):
+    """Recognize a residual bore bounded by two circular disks and a cylinder.
+
+    The opening must be surrounded by bonded planar wall and have a coaxial
+    capped exterior tube. This also applies to an already sealed STEP capsule.
+    """
+    powder_faces = set(component) & powder_surfaces
+    if len(component) != 3 or len(powder_faces) != 1:
+        return None
+    floor = next(iter(powder_faces))
+    planar = [tag for tag in component if gmsh.model.getType(2, tag) == "Plane"]
+    cylindrical = [tag for tag in component if gmsh.model.getType(2, tag) == "Cylinder"]
+    if floor not in planar or len(planar) != 2 or len(cylindrical) != 1:
+        return None
+    cap = next(tag for tag in planar if tag != floor)
+    wall = cylindrical[0]
+    centers = {tag: np.asarray(gmsh.model.occ.getCenterOfMass(2, tag)) for tag in component}
+    areas = {tag: gmsh.model.occ.getMass(2, tag) for tag in component}
+    radius = float(np.sqrt(areas[floor] / np.pi))
+    vector = centers[cap] - centers[floor]
+    height = float(np.linalg.norm(vector))
+    if height <= _CAD_TOLERANCE_MM or radius <= _CAD_TOLERANCE_MM:
+        return None
+    tolerance = max(_CAD_TOLERANCE_MM * 10, max(radius, height) * 1e-7)
+    if not np.allclose(centers[wall], (centers[floor] + centers[cap]) / 2, rtol=0, atol=tolerance):
+        return None
+    if not np.isclose(areas[cap], areas[floor], rtol=1e-7):
+        return None
+    if not np.isclose(areas[wall], 2 * np.pi * radius * height, rtol=1e-7):
+        return None
+    # Full circular end curves exclude annular gaps and rectangular clearance.
+    for face in planar:
+        curves = gmsh.model.getBoundary([(2, face)], combined=True, oriented=False)
+        if len(curves) != 1 or gmsh.model.getType(*curves[0]) != "Circle":
+            return None
+        if not np.isclose(gmsh.model.occ.getMass(*curves[0]), 2 * np.pi * radius, rtol=1e-7):
+            return None
+    floor_rim = gmsh.model.getBoundary([(2, floor)], combined=True, oriented=False)[0]
+    if not any(gmsh.model.getType(2, tag) == "Plane" and floor_rim in gmsh.model.getBoundary(
+            [(2, tag)], combined=True, oriented=False) for tag in bonded_surfaces):
+        return None
+    axis = vector / height
+    tube = _vent_tube_exterior(exterior, centers[floor], axis, radius, height, tolerance)
+    if tube is None:
+        return None
+    return {"powder_face_id": floor, "cad_face_ids": sorted(component),
+            "base_center_mm": centers[floor].tolist(), "axis": axis.tolist(),
+            "radius_mm": radius, "height_mm": height, "volume_mm3": np.pi * radius**2 * height,
+            "classification": "sealed_cylindrical_vent_residual", **tube}
+
+
+def _check_cad_interface(powder_volumes, capsule_volumes):
+    boundaries = []
+    for volumes in (powder_volumes, capsule_volumes):
+        boundaries.append({abs(tag) for dim, tag in gmsh.model.getBoundary(
+            [(3, tag) for tag in sorted(volumes)], combined=True, oriented=False) if dim == 2})
+    powder_surfaces, capsule_surfaces = boundaries
+    if not powder_surfaces & capsule_surfaces:
+        raise GeometryError(_MATERIAL_GAP_MESSAGE, code="material_gap",
+                            details={"minimum_gap_mm": 0.0, "contact_type": "no_shared_material_surface"})
+    surfaces = sorted(powder_surfaces ^ capsule_surfaces)
+    components = _cad_boundary_components(surfaces)
+    bounds = []
+    for component in components:
+        boxes = np.asarray([gmsh.model.occ.getBoundingBox(2, tag) for tag in component])
+        bounds.append(np.r_[boxes[:, :3].min(axis=0), boxes[:, 3:].max(axis=0)])
+    outer = int(np.argmax([np.prod(box[3:] - box[:3]) for box in bounds]))
+    outer_box = bounds[outer]
+    if any(np.any(box[:3] < outer_box[:3] - _CAD_TOLERANCE_MM) or
+           np.any(box[3:] > outer_box[3:] + _CAD_TOLERANCE_MM) for box in bounds):
+        raise GeometryError("A unique enclosing pressure exterior could not be identified.")
+    if set(components[outer]) & powder_surfaces:
+        raise GeometryError(_OPEN_CAPSULE_MESSAGE, code="open_capsule")
+    vents = []
+    for index, component in enumerate(components):
+        exposed = set(component) & powder_surfaces
+        if index == outer or not exposed:
+            continue
+        vent = _sealed_cylindrical_void(component, powder_surfaces,
+                                        powder_surfaces & capsule_surfaces, components[outer])
+        if vent is None:
+            raise GeometryError(_MATERIAL_GAP_MESSAGE, code="material_gap", details={
+                "gap_type": "partial_interface_gap", "powder_face_ids": sorted(exposed),
+                "unbonded_powder_area_mm2": sum(gmsh.model.occ.getMass(2, tag) for tag in exposed),
+                "supported_internal_void": "sealed circular bore inside a capped exterior tube, surrounded by bonded planar wall"})
+        vents.append(vent)
+    return vents
 
 
 def _facets(points, tetrahedra):
@@ -233,6 +374,13 @@ def build_mesh(
         overlap = _overlap_volume(powder, capsule)
         if overlap > max(powder_volume, capsule_volume) * 1e-8:
             raise ValueError(f"Powder and capsule overlap by {overlap:.6g} mm^3. Capsule STEP must contain wall material only.")
+        distance, *closest_points = gmsh.model.occ.getDistance(*powder, *capsule)
+        if not np.isfinite(distance) or distance < 0:
+            raise GeometryError("Could not determine the CAD distance between powder and capsule.")
+        if distance > _CAD_TOLERANCE_MM:
+            raise GeometryError(_MATERIAL_GAP_MESSAGE, code="material_gap", details={
+                "minimum_gap_mm": float(distance), "powder_point_mm": closest_points[:3],
+                "capsule_point_mm": closest_points[3:]})
         try:
             fragments, mapping = gmsh.model.occ.fragment([powder], [capsule])
             gmsh.model.occ.synchronize()
@@ -242,6 +390,7 @@ def build_mesh(
                 raise ValueError("Powder and capsule could not be resolved into disjoint material volumes.")
             if {tag for dim, tag in fragments if dim == 3} != powder_volumes | capsule_volumes:
                 raise ValueError("Boolean fragmentation produced unassigned solid volumes.")
+            sealed_vent_voids = _check_cad_interface(powder_volumes, capsule_volumes)
             for name, volumes, physical_id in (("powder", powder_volumes, 1), ("capsule", capsule_volumes, 2)):
                 gmsh.model.addPhysicalGroup(3, sorted(volumes), physical_id)
                 gmsh.model.setPhysicalName(3, physical_id, name)
@@ -277,7 +426,7 @@ def build_mesh(
             raise ValueError("A unique enclosing pressure exterior could not be identified.")
         outer = components[outer_index]
         if np.any(material[owners[outer]] == 0):
-            raise ValueError("Powder is exposed on the exterior boundary: the capsule is open or the explicit seal is ineffective.")
+            raise GeometryError(_OPEN_CAPSULE_MESSAGE, code="open_capsule")
         powder_triangles, _, _, _, _ = _facets(points, tetrahedra[material == 0])
         face_map = {}
         for tag in surfaces:
@@ -307,6 +456,8 @@ def build_mesh(
             "mesh_volume_mm3": {"powder": float(element_volumes[material == 0].sum()), "capsule": float(element_volumes[material == 1].sum())},
             "pressure_enclosed_volume_mm3": volumes[outer_index],
             "unloaded_boundary_components": len(components) - 1,
+            "sealed_vent_voids": sealed_vent_voids,
+            "cad_contact_tolerance_mm": _CAD_TOLERANCE_MM,
             "overlap_volume_mm3": overlap,
         }
         metadata["relative_volume_error"] = {

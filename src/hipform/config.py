@@ -1,5 +1,6 @@
 """Strict, unit-explicit configuration for an uncalibrated HIP approximation."""
 
+import math
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -106,6 +107,14 @@ class SimulationConfig(Settings):
             raise ValueError("powder reference temperature must exceed initial temperature")
         if self.capsule.reference_temperature_c <= self.cycle[0].temperature_c:
             raise ValueError("capsule reference temperature must exceed initial temperature")
+        steps = 0
+        for a, b in zip(self.cycle, self.cycle[1:]):
+            ratio = (b.time_s - a.time_s) / self.solver.time_step_s
+            if not math.isfinite(ratio) or ratio > self.solver.max_steps:
+                raise ValueError("cycle exceeds solver.max_steps; increase time_step_s or max_steps")
+            steps += math.ceil(ratio)
+            if steps > self.solver.max_steps:
+                raise ValueError("cycle exceeds solver.max_steps; increase time_step_s or max_steps")
         return self
 
 
