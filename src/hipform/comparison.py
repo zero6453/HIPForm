@@ -252,18 +252,15 @@ def _signed_distances(surface, samples, distances, inside_sign, epsilon):
 def compare_target_surfaces(
     target_points, target_triangles, predicted_points, predicted_triangles,
     target_face_types=None, sample_spacing_mm=3., max_samples=200000,
-    planar_limit_mm=10., nonplanar_limit_mm=20.,
 ) -> dict:
     """Signed bidirectional distances in source coordinates; negative is undersize.
 
-    Limits apply to target CAD face types. Reported maxima are sampled mesh
-    distances, not certified bounds on the continuous CAD geometry.
+    Target differences are measurements, separate from powder/capsule contact
+    acceptance. Extrema are sampled, not certified continuous CAD bounds.
     """
     target_points, target_triangles, target_mesh = _closed_surface(target_points, target_triangles, "Target")
     predicted_points, predicted_triangles, predicted_mesh = _closed_surface(predicted_points, predicted_triangles, "Predicted")
     spacing = _positive(sample_spacing_mm, "sample_spacing_mm")
-    planar_limit_mm = _positive(planar_limit_mm, "planar_limit_mm")
-    nonplanar_limit_mm = _positive(nonplanar_limit_mm, "nonplanar_limit_mm")
     if isinstance(max_samples, bool) or not isinstance(max_samples, Integral) or max_samples <= 0:
         raise ValueError("max_samples must be a positive integer")
     if target_face_types is None or len(target_face_types) != len(target_triangles):
@@ -294,31 +291,24 @@ def compare_target_surfaces(
                 "target_triangle_index": int(owners[index]),
                 "direction": "target_to_predicted" if index < counts[0] else "predicted_to_target"}
 
-    regions, advice = {}, []
-    for name, mask, limit in (("planar", is_planar, planar_limit_mm), ("nonplanar", ~is_planar, nonplanar_limit_mm)):
+    regions = {}
+    for name, mask in (("planar", is_planar), ("nonplanar", ~is_planar)):
         indices = np.flatnonzero(mask)
-        region = {"sample_count": len(indices), "tolerance_mm": limit, "lower_limit_mm": 0., "status": "no_samples"}
+        region = {"sample_count": len(indices), "status": "no_samples"}
         if len(indices):
             low, high = indices[np.argmin(values[mask])], indices[np.argmax(values[mask])]
             region.update(min_signed_mm=float(values[low]), max_signed_mm=float(values[high]),
                           min_location=location(low), max_location=location(high),
-                          status="within_limits" if values[low] >= -epsilon and values[high] <= limit + epsilon else "exceeds_limits")
-            for code, index, bound in (("undersize", low, 0.), ("oversize", high, limit)):
-                if (code == "undersize" and values[index] < -epsilon) or (code == "oversize" and values[index] > limit + epsilon):
-                    advice.append({"code": code, "region": name, "signed_deviation_mm": float(values[index]),
-                        "required_surface_correction_mm": float(bound - values[index]), "location": location(index),
-                        "action": "增大对应主内腔的收缩补偿并重新仿真" if code == "undersize" else "减小对应主内腔的收缩补偿并重新仿真",
-                        "scope": "修正量是终态表面回到允许区间所需的局部距离，不是包套壁厚或直接 CAD 偏置量。"})
+                          status="measured")
         regions[name] = region
     positive, negative = np.zeros(len(predicted_triangles)), np.zeros(len(predicted_triangles))
     np.maximum.at(positive, predicted_owner, signed_predicted)
     np.minimum.at(negative, predicted_owner, signed_predicted)
     field = np.where(positive >= -negative, positive, negative)
-    return {"status": "failed" if advice else "passed", "units": "mm", "alignment": "none",
+    return {"status": "measured", "basis": "formed_powder_to_target_cavity", "units": "mm", "alignment": "none",
         "sign_convention": "negative=undersize; positive=oversize", "regions": regions,
         "sampling": {"spacing_mm": spacing, "target_count": counts[0], "predicted_count": counts[1],
                      "equality_tolerance_mm": epsilon, "max_samples": max_samples},
         "fields": {"predicted_triangle_signed_mm": field.tolist()},
-        "upstream_regeneration_advice": advice,
         "warnings": ["Signed surface distances are sampled and do not certify a continuous CAD maximum.",
-                     "The surrogate is uncalibrated; dimensional pass is not engineering acceptance."]}
+                     "Target DIFF is not a powder-to-capsule inner-wall gap assessment."]}

@@ -2,9 +2,9 @@
 
 从包套预测热等静压成品，并与目标模型比较。
 
-HIPForm 直接读取工作目录中的 `cavity.step`（目标成品）和 `capsule.step`（包套材料实体），从包套推导粉末域，生成 `cavity+<job_id>.step` 和验证报告。预测零件欠尺寸为负，判定失败；平面允许 **0～10 mm**，非平面允许 **0～20 mm**。失败结果包含上游重新生成包套的建议。
+HIPForm 直接读取工作目录中的 `cavity.step`（目标成品）和 `capsule.step`（包套材料实体），从包套推导粉末域，共同求解包套与粉末的变形，生成成型粉末 `cavity+<job_id>.step` 和报告。与目标模型的 DIFF 保留有符号偏差，欠尺寸为负，不据此判定通过或失败。
 
-当前版本是未经标定的小应变仿真原型。默认 HIP 工况可能超出模型适用范围；尺寸采样通过不代表真实工件验收通过。
+**平面 0～10 mm、非平面 0～20 mm** 指烧制后粉末表面到包套内壁的间隙。当前未经标定的小应变模型将两材料界面绑定，共享节点强制间隙为零，不能预测实际分离，因此间隙验证返回 `not_assessed`，不据此生成包套修正量。默认 HIP 工况还可能超出模型适用范围；成型粉末 STEP 未包含去包套后的应力释放。
 
 ## 运行当前两份 STEP
 
@@ -47,7 +47,7 @@ hipform serve --port 8000
 
 接口直接读取固定目录中的两份文件，不需要上传或逐次传 STEP 路径。上游生成成功后调用此接口，即可创建验证任务；查询任务后打开 `report_url`。默认材料为20号钢和TC4，保温保压为900℃、120 MPa、3小时，粉末初始相对密度为0.65；全部配置可通过 Swagger 查询、保存和修改。
 
-`status: completed` 表示计算完成，`result.validation_status` 表示尺寸通过或失败。尺寸失败仍保留预测 STEP、报告和 `upstream_regeneration_advice`。
+`status: completed` 表示计算完成，当前 `result.validation_status: not_assessed` 表示尚不能评估真实烧后间隙。报告包含烧制前后包套与粉末的三维显示、目标 DIFF、工艺曲线和模型限制；`contact-assessment.json` 说明未评估原因，`upstream-advice.json` 返回空建议及阻塞原因。
 
 ## 演示与文档
 

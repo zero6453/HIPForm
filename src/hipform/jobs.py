@@ -19,7 +19,7 @@ from .inputs import copy_step, load_provenance, validate_step
 
 
 ARTIFACTS = frozenset({"report.html", "result.json", "config.resolved.json", "mesh-info.json",
-                      "comparison.json", "solver.json", "history.csv", "upstream-advice.json", "predicted-powder.stl",
+                      "comparison.json", "contact-assessment.json", "solver.json", "history.csv", "upstream-advice.json", "predicted-powder.stl",
                       "reference-powder.stl", "predicted-assembly.vtu", "initial-mesh.vtu",
                       "mesh.npz", "solution.npz", "run.log"})
 

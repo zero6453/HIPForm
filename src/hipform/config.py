@@ -70,8 +70,8 @@ class Solver(Settings):
 
 
 class Tolerances(Settings):
-    flat_mm: Positive = 10
-    angular_mm: Positive = 20
+    flat_mm: Positive = Field(default=10, description="verify: formed powder planar surface to capsule inner-wall gap upper limit (mm); bonded solver cannot assess separation. Legacy run: target distance limit.")
+    angular_mm: Positive = Field(default=20, description="verify: formed powder nonplanar surface to capsule inner-wall gap upper limit (mm); not a target cavity DIFF limit. Legacy run: angular region distance limit.")
     angular_face_ids: list[Annotated[int, Field(gt=0)]] = Field(default_factory=list)
     sample_spacing_mm: Positive = 3
     max_samples: Annotated[int, Field(gt=0)] = 200000

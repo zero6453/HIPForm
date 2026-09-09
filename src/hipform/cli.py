@@ -78,6 +78,7 @@ def _run(args):
         target = None
         derived = None
         if args.command == "verify":
+            from .assessment import assess_capsule_contact
             from .cad_workflow import derive_powder_domain, mesh_step_surface
             from .inputs import file_info, load_provenance
             inputs = {"cavity": file_info(args.cavity), "capsule": file_info(args.capsule)}
@@ -133,29 +134,33 @@ def _run(args):
             export_faceted_step((mesh.points + result.displacement)[predicted_nodes], inverse.reshape(-1, 3), predicted_step)
             comparison = compare_target_surfaces(target[0], target[1],
                 (mesh.points + result.displacement)[predicted_nodes], inverse.reshape(-1, 3), target[2],
-                sample_spacing_mm=tolerance.sample_spacing_mm, max_samples=tolerance.max_samples,
-                planar_limit_mm=tolerance.flat_mm, nonplanar_limit_mm=tolerance.angular_mm)
+                sample_spacing_mm=tolerance.sample_spacing_mm, max_samples=tolerance.max_samples)
+            contact = assess_capsule_contact(mesh, result, tolerance)
             _json(output / "comparison.json", comparison)
-            _json(output / "upstream-advice.json", {"job_id": job_id, "status": comparison["status"],
-                  "recommendations": comparison["upstream_regeneration_advice"]})
+            _json(output / "contact-assessment.json", contact)
+            _json(output / "upstream-advice.json", {"job_id": job_id, "status": contact["status"],
+                  "recommendations": [], "blocked_reason": contact["reason"],
+                  "required_model": "Calibrated finite-strain powder/capsule model with separable contact"})
             stage = "report"
             write_verification_report(output / "report.html", comparison, payload,
                 {"job_id": job_id, "target": str(args.cavity), "predicted_step": predicted_step.name},
-                mesh=mesh, result=result, target=target)
-            summary = {"execution_status": "completed", "validation_status": comparison["status"],
+                mesh=mesh, result=result, target=target, contact_assessment=contact)
+            summary = {"execution_status": "completed", "validation_status": contact["status"],
                        "job_id": job_id, "calibrated": False, "model_validity": result.metadata["model_validity"],
                        "final_state": result.metadata["final_state"], "final_metrics": result.history[-1],
                        "engineering_acceptance": "not_assessed", "comparison_basis": "predicted cavity+jobid.step versus target cavity.step",
-                       "predicted_step": predicted_step.name, "upstream_regeneration_advice": comparison["upstream_regeneration_advice"],
+                       "predicted_step": predicted_step.name, "upstream_regeneration_advice": [],
+                       "contact_assessment": contact, "target_diff_status": comparison["status"],
                        "volume_shrinkage_fraction": 1 - result.history[-1]["powder_volume_mm3"] / result.history[0]["powder_volume_mm3"],
                        "config_sha256": hashlib.sha256((output / "config.resolved.json").read_bytes()).hexdigest(),
                        "artifacts": {"report": "report.html", "predicted_step": predicted_step.name,
-                           "comparison": "comparison.json", "advice": "upstream-advice.json", "history": "history.csv"},
+                           "comparison": "comparison.json", "contact_assessment": "contact-assessment.json",
+                           "advice": "upstream-advice.json", "history": "history.csv"},
                        "geometry": mesh.metadata, "elapsed_s": round(time.monotonic()-started, 2), "warnings": result.warnings + comparison["warnings"]}
             _json(output / "result.json", summary)
             print(f"Report: {output / 'report.html'}")
             print(f"Predicted STEP: {predicted_step}")
-            print(f"Validation: {comparison['status']}")
+            print(f"Inner-wall gap validation: {contact['status']}; target DIFF: {comparison['status']}")
             return 0
         comparison = compare_surfaces(mesh.points, mesh.points + result.displacement,
             mesh.powder_triangles, mesh.powder_face_ids, flat_mm=tolerance.flat_mm,

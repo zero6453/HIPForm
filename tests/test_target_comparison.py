@@ -12,22 +12,21 @@ def compare(target, predicted, **kwargs):
                                    predicted.faces, ["Plane"] * len(target.faces), **kwargs)
 
 
-def test_same_surface_passes_despite_floating_point_roundoff():
+def test_same_surface_has_zero_diff_despite_floating_point_roundoff():
     target = trimesh.creation.icosphere(subdivisions=1, radius=3)
     result = compare(target, target.copy())
-    assert result["status"] == "passed"
+    assert result["status"] == "measured"
     assert result["regions"]["planar"]["min_signed_mm"] == 0
 
 
-def test_undersize_returns_numeric_correction_and_location():
+def test_target_diff_measures_undersize_without_using_capsule_gap_limits():
     target = trimesh.creation.box(extents=[10, 10, 10])
     result = compare(target, trimesh.creation.box(extents=[8, 8, 8]))
-    assert result["status"] == "failed"
+    assert result["status"] == "measured"
     assert result["regions"]["planar"]["min_signed_mm"] == pytest.approx(-np.sqrt(3))
-    advice = result["upstream_regeneration_advice"][0]
-    assert advice["code"] == "undersize"
-    assert advice["required_surface_correction_mm"] == pytest.approx(np.sqrt(3))
-    assert len(advice["location"]["point_mm"]) == 3
+    assert len(result["regions"]["planar"]["min_location"]["point_mm"]) == 3
+    assert "tolerance_mm" not in result["regions"]["planar"]
+    assert "upstream_regeneration_advice" not in result
 
 
 def test_signed_shift_detects_both_missing_and_excess_material():
@@ -35,8 +34,9 @@ def test_signed_shift_detects_both_missing_and_excess_material():
     predicted = target.copy()
     predicted.apply_translation([11, 0, 0])
     result = compare(target, predicted)
-    assert result["status"] == "failed"
-    assert {a["code"] for a in result["upstream_regeneration_advice"]} == {"undersize", "oversize"}
+    assert result["status"] == "measured"
+    assert result["regions"]["planar"]["min_signed_mm"] < 0
+    assert result["regions"]["planar"]["max_signed_mm"] > 10
 
 
 def test_sampling_budget_is_checked_before_allocating_points():
@@ -45,16 +45,16 @@ def test_sampling_budget_is_checked_before_allocating_points():
         compare(target, target, sample_spacing_mm=1e-100, max_samples=10)
 
 
-def test_nonplanar_target_uses_its_configured_limit():
+def test_nonplanar_target_reports_diff_without_a_gap_verdict():
     target = trimesh.creation.icosphere(subdivisions=1, radius=10)
     predicted = trimesh.creation.icosphere(subdivisions=1, radius=25)
     args = (target.vertices, target.faces, predicted.vertices, predicted.faces,
             ["Sphere"] * len(target.faces))
     result = compare_target_surfaces(*args, sample_spacing_mm=10)
-    assert result["status"] == "passed"
+    assert result["status"] == "measured"
     assert result["regions"]["planar"]["status"] == "no_samples"
     assert result["regions"]["nonplanar"]["max_signed_mm"] == pytest.approx(15)
-    assert compare_target_surfaces(*args, sample_spacing_mm=10, nonplanar_limit_mm=14)["status"] == "failed"
+    assert "tolerance_mm" not in result["regions"]["nonplanar"]
 
 
 def test_invalid_indices_are_rejected_before_distance_queries():

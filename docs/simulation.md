@@ -4,7 +4,7 @@
 两文件放在工作目录，仿真从包套独立提取主内腔；目标不参与粉末域生成。
 `assembly.step` 不参与此流程。
 
-**当前为未经材料试验标定的小应变模型。** 尺寸采样通过并不构成工程验收。
+**当前为未经材料试验标定的小应变模型。** 包套与粉末共同求解，但绑定界面无法评估真实烧后分离间隙。
 终态仍附着包套，未模拟去包套的应力释放；应变或密度超出适用范围会写入报告。
 
 ## 直接运行
@@ -18,8 +18,8 @@ hipform verify
 自动生成独立任务目录 `simulation-runs/<jobid>`，其中包含 `report.html` 和
 `cavity+<jobid>.step`。可用 `--config hip-process.json` 指定工艺，或用
 `--output simulation-runs/example-001` 指定空结果目录；已有结果不会被覆盖。
-命令返回 0 表示计算与报告完成，2 表示执行失败；尺寸是否通过另见
-`result.json.validation_status`，失败也保留已完成的预测模型和修改建议。
+命令返回 0 表示计算与报告完成，2 表示执行失败。当前
+`result.json.validation_status` 为 `not_assessed`，保留预测模型、目标 DIFF 和间隙未评估说明；它不表示工程通过。
 
 API 同样直接读取服务启动目录的两个固定文件，任务只需要 `config` 或 `config_id`。
 使用 `hipform serve` 启动，打开 <http://127.0.0.1:8000/docs>；无需上传或逐次传入文件路径。
@@ -69,6 +69,8 @@ Assembly contains disconnected material bodies in the mesh.
 开放、不受支持的形状不能通过跳过密封检查来继续仿真。
 此流程默认主内腔填满粉末，不能识别 CAD 未提供的实际装填缺陷。
 没有摩擦滑移、分离、焊缝强度、气体泄漏、温度梯度、屈曲或破裂模型。
+共享节点使烧制后绑定接口两侧位移相同，间隙恒为零，这是模型约束而非独立验证结果。
+要预测实际分离，需要可分离的有限应变接触求解及经高温试验标定的材料模型；当前未实现。
 
 ## 数学模型
 
@@ -88,29 +90,37 @@ epsilon_free = (D_initial / D)^(1/3) - 1
 
 ## 成品比较与输出
 
-目标独立三角化，并依据 STEP 面类型分类：`Plane` 使用 0～10 mm，其余面使用
-0～20 mm（可通过配置调整上限）。双向采样，负值表示预测材料欠尺寸，正值表示余量。
-既检查预测到目标，也检查目标到预测，保留欠尺寸和超限位置；无最佳拟合或缩放。
+目标独立三角化，并依据 STEP 面类型分为 `Plane` 和非平面，双向采样测量 DIFF。
+负值表示预测材料欠尺寸，正值表示余量。既测量预测到目标，也测量目标到预测，
+保留极值及位置；无最佳拟合或缩放。`comparison.json.status` 为 `measured`，无公差通过/失败判定。
 只有浮点数值误差使用已记录的极小 epsilon，不能掩盖真实欠尺寸。
-采样距离仍受网格和采样间距影响，不证明连续 CAD 的公差极值。
+采样距离仍受网格和采样间距影响，不证明连续 CAD 的距离极值。
+
+平面 0～10 mm、非平面 0～20 mm 是烧制后粉末表面到**包套内壁**的间隙要求，
+不用于目标 DIFF，也不表示包套壁厚。`tolerances.flat_mm` / `angular_mm` 记录对应上限。
+当前绑定模型不能产生真实分离，`contact-assessment.json.status` 为 `not_assessed`，
+原因码为 `bonded_interface_prevents_separation`；不会把强制的零间隙报告为通过。
+可识别的抽气管残余空间不属于待评估的粉末与包套接触接口。
 
 | 文件 | 用途 |
 |---|---|
-| `report.html` | 离线三维对比、公差表、温压密度曲线、限制和上游建议 |
+| `report.html` | 烧制前后包套与粉末、目标三维 DIFF、间隙评估说明、温压密度曲线及模型限制 |
 | `cavity+<jobid>.step` | 完整预测表面的三角面 BREP STEP，可重新导入为实体，无自动减面 |
 | `predicted-powder.stl` | 同一预测表面，导入软件时选择 mm |
 | `predicted-assembly.vtu` | 包套和粉末终态体网格 |
 | `derived-cavity-<jobid>.step` | 从包套提取的初始粉末域，供本地追溯 |
 | `sealed-capsule-<jobid>.step` | 保留真实壁/管并加虚拟封口的仿真副本 |
 | `comparison.json` | 有符号距离、采样设置、各区极值和位置 |
-| `upstream-advice.json` | 机器可读的欠尺寸/超限原因和终态局部修正建议 |
+| `contact-assessment.json` | 烧后内壁间隙要求和当前无法评估分离的原因 |
+| `upstream-advice.json` | 当前返回 `not_assessed`、空建议和 `blocked_reason` |
 | `history.csv` / `solver.json` | 温压、规定密度、体积反算密度、残差和模型适用性 |
 | `config.resolved.json` | 本次工艺材料参数快照 |
-| `mesh-info.json` / `result.json` | 源文件哈希、提取/封口证据、执行与尺寸状态 |
+| `mesh-info.json` / `result.json` | 源文件哈希、提取/封口证据、执行与间隙评估状态 |
 
 STEP 是网格的真实面片实体，不是恢复参数化设计的光滑曲面。
-上游建议中的修正值表示**终态局部表面**回到允许区间所需距离，不是钢壁厚或直接 CAD 偏置。
-调整包套主内腔收缩补偿后需要重新计算。
+粉末 STEP 对应包套仍附着的终态，未包含去包套后的应力释放。
+上游建议暂为 `recommendations: []`；缺少有限应变接触模型和高温标定时，
+不能根据绑定的零间隙或目标 DIFF 自动发出包套再生成修正量。
 
 ## 验证和旧演示
 
@@ -125,3 +135,4 @@ python -m pytest -q
 `hipform run/mesh` 保留原数值研究接口，其 `--cavity` 仍指初始粉末域，
 与新 `verify` 的目标成品含义不同。`scripts/run_demo.py`、`hipform example` 与
 `scripts/check_hip_sensitivity.py` 用于旧演示/网格敏感性研究；API 不再自动切回旧语义。
+旧 `run` 的初始到终态偏差阈值及通过/失败输出仅属于该研究接口，不代表 `verify` 的目标 DIFF 或烧后内壁间隙判定。

@@ -172,16 +172,20 @@ def test_target_size_does_not_define_the_powder_domain(client, solids):
     assert submitted.status_code == 202, submitted.text
     job = wait_job(client, submitted.json()["id"])
     assert job["status"] == "completed", job
-    assert job["result"]["validation_status"] == "passed"
+    assert job["result"]["validation_status"] == "not_assessed"
+    contact = client.get(job["artifacts"]["contact-assessment.json"]).json()
+    assert contact == job["result"]["contact_assessment"]
+    assert contact["reason_code"] == "bonded_interface_prevents_separation"
     comparison = client.get(job["artifacts"]["comparison.json"]).json()
     assert comparison["regions"]["planar"]["min_signed_mm"] > 0
+    assert comparison["status"] == "measured"
 
 
-@pytest.mark.parametrize("target_half,powder_half,metric,code", [
-    (6, 5, "min_signed_mm", "undersize"), (1, 20, "max_signed_mm", "oversize"),
+@pytest.mark.parametrize("target_half,powder_half,metric", [
+    (6, 5, "min_signed_mm"), (1, 20, "max_signed_mm"),
 ])
-def test_rejected_dimensions_keep_report_prediction_and_upstream_advice(
-        client, solids, target_half, powder_half, metric, code):
+def test_target_diff_does_not_issue_inner_wall_gap_verdict_or_regeneration_offsets(
+        client, solids, target_half, powder_half, metric):
     for role in ("cavity", "capsule"):
         gmsh.initialize(readConfigFiles=False)
         try:
@@ -203,15 +207,19 @@ def test_rejected_dimensions_keep_report_prediction_and_upstream_advice(
     assert submitted.status_code == 202, submitted.text
     job = wait_job(client, submitted.json()["id"])
     assert job["status"] == "completed", job
-    assert job["result"]["validation_status"] == "failed"
+    assert job["result"]["validation_status"] == "not_assessed"
     assert job["error"] is None
     comparison = client.get(job["artifacts"]["comparison.json"]).json()
     deviation = comparison["regions"]["planar"][metric]
     assert deviation < 0 if metric == "min_signed_mm" else deviation > 10
-    advice = job["result"]["upstream_regeneration_advice"]
-    assert any(item["code"] == code for item in advice)
-    assert client.get(job["artifacts"]["upstream-advice.json"]).json() == {
-        "job_id": job["id"], "status": "failed", "recommendations": advice}
+    assert comparison["status"] == "measured"
+    assert "tolerance_mm" not in comparison["regions"]["planar"]
+    assert job["result"]["upstream_regeneration_advice"] == []
+    advice = client.get(job["artifacts"]["upstream-advice.json"]).json()
+    assert advice["job_id"] == job["id"]
+    assert advice["status"] == "not_assessed"
+    assert advice["recommendations"] == []
+    assert advice["blocked_reason"]
     assert client.get(job["report_url"]).status_code == 200
     assert client.get(job["artifacts"][f"cavity+{job['id']}.step"]).content.startswith(b"ISO-10303-21;")
 

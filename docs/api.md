@@ -53,7 +53,7 @@ simulation-runs/api/jobs/<job_id>/run/report.html
 | `cycle[]` | 每个时间点含 `time_s`、`temperature_c`、`pressure_mpa`，点间线性插值 |
 | `powder`、`capsule` | 材料弹性、热膨胀、致密化和松弛参数 |
 | `solver` | 网格尺寸、时间步、最大步数 |
-| `tolerances` | 采样设置；成品验证使用平面 0～10 mm、非平面 0～20 mm |
+| `tolerances` | DIFF 采样设置；`flat_mm` / `angular_mm` 为烧后粉末到包套内壁的平面 / 非平面间隙上限，默认 10 / 20 mm |
 
 单位为 mm、MPa、s、℃；质量密度为 kg/mm³。完整配置以 Swagger 和 `config.resolved.json` 为准。
 
@@ -64,20 +64,24 @@ simulation-runs/api/jobs/<job_id>/run/report.html
 1. 从 `capsule.step` 独立提取主粉末域，目标成品不参与粉末域生成。
 2. 识别支持的直圆抽气管，在仿真副本的管口虚拟封口，保留原包套几何；主粉末域不包含残余管腔。
 3. 检查材料连通、粉末与包套贴合和密封；不支持或有歧义的几何会给出失败报告。
-4. 求解并生成 `cavity+<job_id>.step`，与目标 `cavity.step` 在原坐标系比较，不做自动配准或缩放。
+4. 共同求解包套与粉末的位移，输出成型粉末 `cavity+<job_id>.step`，与目标 `cavity.step` 在原坐标系比较，不做自动配准或缩放。
 
-预测零件比目标小为负偏差，负值判失败；正偏差在平面 0～10 mm、非平面 0～20 mm 内通过。失败时 `upstream_regeneration_advice` 返回包套重新生成建议。
+目标 DIFF 只测量有符号偏差：预测零件比目标小为负，比目标大为正。`comparison.json.status` 为 `measured`，不将目标尺寸偏差与间隙阈值比较，也不从 DIFF 自动推导包套修正量。
 
-必须区分两个状态：
+平面 0～10 mm、非平面 0～20 mm 指**烧制后粉末表面到包套内壁的间隙**，不是到包套外壁的厚度，也不是到目标成品的距离。当前绑定界面共享节点，两材料接触处的间隙被强制为零，无法评估真实分离；允许保留的抽气管残余空间不属于此材料接口。`contact-assessment.json` 因此返回 `status: not_assessed` 和 `reason_code: bonded_interface_prevents_separation`。需要有限应变接触求解及高温材料标定后，才能使用这些阈值作实际判定。
+
+必须区分以下状态：
 
 | 字段 | 含义 |
 | --- | --- |
 | `status: completed` | 数值流程完成，有可查看的预测结果 |
-| `result.validation_status: passed/failed` | 成品尺寸采样检查通过/失败 |
+| `result.validation_status: not_assessed` | 当前模型不能评估真实烧后间隙 |
+| `comparison.status: measured` | 目标 DIFF 数值测量完成，无通过/失败判定 |
+| `contact_assessment.status: not_assessed` | 绑定界面不能预测分离间隙，详见 `reason_code` |
 | `status: failed` | 几何、配置、求解、超时或服务中断导致流程失败 |
 | `engineering_acceptance: not_assessed` | 未做工程验收；当前模型未经标定 |
 
-尺寸失败的任务仍为 `completed`，保留预测 STEP、报告和上游建议；执行失败时保留错误报告及日志，不将中间模型作为有效预测下载。粉末与包套材料不连接时错误消息为 `Assembly contains disconnected material bodies in the mesh.`。
+计算完成后保留预测 STEP、DIFF、间隙评估说明和报告；`not_assessed` 不能视为通过。执行失败时保留错误报告及日志，不将中间模型作为有效预测下载。初始粉末与包套材料不连接时错误消息为 `Assembly contains disconnected material bodies in the mesh.`，这与烧制后的分离评估是不同检查。
 
 ## 接口表
 
@@ -129,6 +133,6 @@ def verify_current_pair(process_config=None):
 
 ## 结果文件
 
-`artifacts` 返回本任务可下载文件的 URL，包括 `cavity+<job_id>.step`、预测 STL/VTU、`report.html`、`history.csv`、`comparison.json`、`upstream-advice.json`、`solver.json`、`result.json` 和 `config.resolved.json`。`upstream-advice.json` 含任务 ID、尺寸状态及结构化建议；建议区分 `undersize` 与 `oversize`，记录位置和终态表面需修正的距离。
+`artifacts` 返回本任务可下载文件的 URL，包括 `cavity+<job_id>.step`、预测 STL/VTU、`report.html`、`history.csv`、`comparison.json`、`contact-assessment.json`、`upstream-advice.json`、`solver.json`、`result.json` 和 `config.resolved.json`。当前 `upstream-advice.json` 返回 `status: not_assessed`、`recommendations: []` 及 `blocked_reason`，说明缺少可评估分离的接触模型与材料标定。调用方不应据绑定的零间隙或目标 DIFF 自动重生成包套。
 
-预测 STEP 是有限元表面的三角面 BREP，不是解析 CAD 特征重建。报告应结合模型适用性、网格和采样误差阅读；尺寸通过不等于真实工件验收通过。结果不会自动发布到 GitHub Pages。
+预测 STEP 是成型粉末有限元表面的三角面 BREP，不是解析 CAD 特征重建；其位置对应包套仍附着的终态，未模拟去包套后的应力释放。报告显示烧制前后包套与粉末、目标 DIFF、温压密度曲线及模型限制，应结合模型适用性、网格和采样误差阅读。结果不会自动发布到 GitHub Pages。

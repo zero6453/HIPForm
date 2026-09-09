@@ -279,6 +279,12 @@ def _facets(points, tetrahedra):
     return faces[boundary], owners[boundary], inverse, counts, owners
 
 
+def material_boundary(mesh: SimulationMesh, material_id: int) -> np.ndarray:
+    """Return outward triangles of one material, including its shared interface."""
+    triangles, _, _, _, _ = _facets(mesh.points, mesh.tetrahedra[mesh.material == material_id])
+    return triangles
+
+
 def _components(count, pairs):
     parent = np.arange(count)
 

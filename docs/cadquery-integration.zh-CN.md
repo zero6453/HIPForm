@@ -12,10 +12,11 @@ flowchart TD
     C --> E[从包套提取粉末域并虚拟封口]
     E --> F[CAD 贴合与密封检查]
     F -->|执行失败| G[结构化错误 + 失败 HTML 报告]
-    F -->|通过| H[网格、求解、预测 STEP]
-    H --> I[与目标 cavity.step 比较]
+    F -->|通过| H[包套与粉末共同求解、成型粉末 STEP]
+    H --> I[与目标 cavity.step 作有符号 DIFF]
+    H --> K[烧后内壁间隙：当前绑定模型未评估]
     I --> J[HTML 报告 + cavity+jobid.step + 数值结果]
-    I -->|尺寸失败| K[上游包套重新生成建议]
+    K --> J
 ```
 
 ## 两个文件的含义
@@ -48,7 +49,7 @@ cd /Users/zeroduan/Documents/Codex/freecad
 
 上游若采用 `result.json.output_dir` 指向的 `attempt-N` 目录，应在成功分支将本次的两份 STEP 写入约定共享目录，再调用 `POST /api/jobs`。当前没有修改上游项目，也没有自动监听其输出；接入后才会自动触发。
 
-## 报告和失败建议
+## 报告和评估状态
 
 查询 `GET /api/jobs/{job_id}`，返回的 `report_url` 可直接打开。报告磁盘路径为：
 
@@ -56,12 +57,16 @@ cd /Users/zeroduan/Documents/Codex/freecad
 simulation-runs/api/jobs/<job_id>/run/report.html
 ```
 
-同目录的 `cavity+<job_id>.step` 是预测成品三角面 BREP。`artifacts` 提供本任务 STEP、STL/VTU、温压/密度历程及 JSON 结果下载链接。
+同目录的 `cavity+<job_id>.step` 是成型粉末三角面 BREP，位置对应包套仍附着的终态，未包含去包套后的应力释放。包套参与共同求解，报告显示烧制前后包套与粉末。`artifacts` 提供本任务 STEP、STL/VTU、温压/密度历程及 JSON 结果下载链接。
 
-预测成品与目标 `cavity.step` 使用原坐标系进行有符号偏差比较：欠尺寸为负，判失败；平面允许 0～10 mm，非平面允许 0～20 mm。
+预测成品与目标 `cavity.step` 使用原坐标系进行有符号 DIFF：欠尺寸为负，余量为正，仅作测量。平面 0～10 mm、非平面 0～20 mm 是**烧后粉末到包套内壁的间隙要求**，不用于目标 DIFF。当前两材料共享界面节点，零间隙由绑定约束强制产生，无法预测实际分离，因此不判定间隙通过或失败。
 
 - `status: completed`：计算完成，应继续查看 `result.validation_status`。
-- `validation_status: failed`：尺寸检查失败，预测模型和报告仍可查看；`upstream_regeneration_advice` 给出包套重新生成建议。
+- `result.validation_status: not_assessed`：真实烧后间隙尚不能评估，不能当作通过。
+- `comparison.status: measured`：目标 DIFF 完成，保留数值和位置，无尺寸通过/失败状态。
+- `contact_assessment.status: not_assessed`：详见 `contact-assessment.json`，原因码为 `bonded_interface_prevents_separation`。
 - `status: failed`：几何或计算流程失败，查看 `error`、报告和日志。
 
-20号钢、TC4、900℃、120 MPa、保温保压3小时和初始相对密度0.65已纳入默认配置。当前有限元模型未经高温试验标定；材料强度参考值和经验收缩率不等同于已标定的本构参数，尺寸通过不等于工程验收。
+当前 `upstream-advice.json` 为 `status: not_assessed`、`recommendations: []`，`blocked_reason` 说明需要有限应变接触求解及高温材料标定。上游不应依据绑定零间隙或目标 DIFF 自动修改包套参数。
+
+20号钢、TC4、900℃、120 MPa、保温保压3小时和初始相对密度0.65已纳入默认配置。当前小应变有限元模型未经高温试验标定；材料强度参考值和经验收缩率不等同于已标定的本构参数，结果不能作为真实工件工程验收。
