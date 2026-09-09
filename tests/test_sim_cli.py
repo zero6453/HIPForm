@@ -14,7 +14,7 @@ def test_default_config_can_be_created_and_loaded(tmp_path):
     config = load_config(path)
     assert config.tolerances.flat_mm == 10
     assert config.tolerances.angular_mm == 20
-    assert max(p.temperature_c for p in config.cycle) == 920
+    assert max(p.temperature_c for p in config.cycle) == 900
     assert main(["init", "--output", str(path)]) == 2
 
 

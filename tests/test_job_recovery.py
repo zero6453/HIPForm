@@ -25,14 +25,14 @@ PARENT = textwrap.dedent("""\
     from hipform.jobs import JobStore
 
     root, cavity, capsule = map(Path, sys.argv[1:])
-    store = JobStore(root)
+    store = JobStore(root, source_dir=cavity.parent)
     store.start()
     config = SimulationConfig.model_validate({
         "solver": {"mesh_size_mm": 4, "time_step_s": 1, "max_steps": 10000},
         "cycle": [{"time_s": 0, "temperature_c": 20, "pressure_mpa": 0},
                   {"time_s": 9000, "temperature_c": 20, "pressure_mpa": 0}],
     })
-    job = store.submit(JobRequest(cavity_path=cavity, capsule_path=capsule, config=config))
+    job = store.submit(JobRequest(config=config))
     folder = root / "jobs" / job["id"]
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:

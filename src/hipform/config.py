@@ -86,8 +86,8 @@ class Seal(Settings):
 
 def default_cycle():
     return [CyclePoint(time_s=t, temperature_c=temp, pressure_mpa=p) for t, temp, p in (
-        (0, 20, 0), (3600, 920, 120), (7200, 900, 120),
-        (18000, 900, 120), (21600, 200, 120), (23400, 20, 0),
+        (0, 20, 0), (3600, 900, 120), (14400, 900, 120),
+        (18000, 200, 120), (19800, 20, 0),
     )]
 
 

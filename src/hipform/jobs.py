@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import sys
 import threading
-from typing import BinaryIO
 import uuid
 
 from filelock import FileLock, Timeout
@@ -20,7 +19,7 @@ from .inputs import copy_step, load_provenance, validate_step
 
 
 ARTIFACTS = frozenset({"report.html", "result.json", "config.resolved.json", "mesh-info.json",
-                      "comparison.json", "solver.json", "history.csv", "predicted-powder.stl",
+                      "comparison.json", "solver.json", "history.csv", "upstream-advice.json", "predicted-powder.stl",
                       "reference-powder.stl", "predicted-assembly.vtu", "initial-mesh.vtu",
                       "mesh.npz", "solution.npz", "run.log"})
 
@@ -50,14 +49,15 @@ def checked_id(value):
 
 
 class JobStore:
-    def __init__(self, root: Path, *, timeout_s=3600):
+    def __init__(self, root: Path, *, timeout_s=3600, source_dir: Path | None = None):
         self.root = Path(root).resolve()
+        self.source_dir = Path(source_dir or Path.cwd()).resolve()
         self.timeout_s = timeout_s
         self.lock = threading.RLock()
         self.executor = None
         self.processes = {}
         self.closing = False
-        for name in ("jobs", "configs", "inputs"):
+        for name in ("jobs", "configs"):
             (self.root / name).mkdir(parents=True, exist_ok=True)
         self.service_lock = FileLock(self.root / ".service.lock", thread_local=False)
 
@@ -120,24 +120,6 @@ class JobStore:
     def list_configs(self):
         return [read_json(path) for path in sorted((self.root / "configs").glob("*.json"))]
 
-    def save_inputs(self, uploads: dict[str, tuple[str, BinaryIO]]) -> dict:
-        input_id = uuid.uuid4().hex
-        folder = self.root / "inputs" / input_id
-        folder.mkdir()
-        try:
-            filenames = {}
-            for role, (filename, stream) in uploads.items():
-                if Path(filename).suffix.lower() not in {".step", ".stp"}:
-                    raise ValueError("Both uploads must have .step or .stp extensions")
-                copy_step(stream, folder / f"{role}.step")
-                filenames[role] = Path(filename).name
-            record = {"id": input_id, "created_at": now(), "filenames": filenames}
-            write_json(folder / "input.json", record)
-            return record
-        except BaseException:
-            shutil.rmtree(folder)
-            raise
-
     def _snapshot_inputs(self, sources: dict[str, Path], folder: Path) -> dict:
         folder.mkdir()
         snapshots = {}
@@ -160,13 +142,11 @@ class JobStore:
                 config = SimulationConfig.model_validate(self.get_config(request.config_id)["config"])
             else:
                 config = request.config
-            if request.input_id:
-                inputs = self.root / "inputs" / checked_id(request.input_id)
-                if not (inputs / "input.json").is_file():
-                    raise KeyError(request.input_id)
-                sources = {role: inputs / f"{role}.step" for role in ("cavity", "capsule")}
-            else:
-                sources = {"cavity": request.cavity_path, "capsule": request.capsule_path}
+            sources = {"cavity": self.source_dir / "cavity.step",
+                       "capsule": self.source_dir / "capsule.step"}
+            missing = [path.name for path in sources.values() if not path.is_file()]
+            if missing:
+                raise ValueError(f"Required {', '.join(missing)} not found in the service source directory")
             sources = {role: validate_step(path) for role, path in sources.items()}
             job_id = uuid.uuid4().hex
             folder = self.root / "jobs" / job_id
@@ -177,7 +157,7 @@ class JobStore:
                 write_json(folder / "config.json", resolved)
                 job = {"id": job_id, "name": request.name, "status": "queued", "created_at": now(),
                        "updated_at": now(), "config_id": request.config_id, "config": resolved,
-                       "inputs": snapshots, "workflow": request.workflow, "error": None}
+                       "inputs": snapshots, "workflow": "verify", "error": None}
                 self._save(job)
                 self.executor.submit(self._run, job_id)
             except Exception:
@@ -218,9 +198,9 @@ class JobStore:
             if not path.is_symlink() and path.is_file():
                 artifacts[name] = path
         if job["status"] == "completed":
-            for path in (folder / "run").glob("cavity+*.step"):
-                if path.is_file() and not path.is_symlink() and re.fullmatch(r"cavity\+[a-f0-9]{12}\.step", path.name):
-                    artifacts[path.name] = path
+            path = folder / "run" / f"cavity+{job['id']}.step"
+            if path.is_file() and not path.is_symlink():
+                artifacts[path.name] = path
         return artifacts
 
     def artifact(self, job_id: str, name: str) -> Path:
@@ -235,16 +215,11 @@ class JobStore:
                 return
             job.update(status="running", started_at=now())
             self._save(job)
-        # Existing synthetic box capsules have no vent and retain the legacy
-        # initial-powder contract; real HIP capsules with circular vents use
-        # the target-verification workflow.
-        requested_workflow = job.get("workflow", "auto")
-        workflow = ("verify" if b"CIRCLE" in (folder / "inputs" / "capsule.step").read_bytes().upper() else "run") if requested_workflow == "auto" else requested_workflow
-        workflow = "run" if workflow == "legacy" else workflow
-        command = [sys.executable, "-u", "-m", "hipform.worker", workflow,
+        command = [sys.executable, "-u", "-m", "hipform.worker", "verify",
                    "--cavity", str(folder / "inputs" / "cavity.step"),
                    "--capsule", str(folder / "inputs" / "capsule.step"),
-                   "--config", str(folder / "config.json"), "--output", str(folder / "working-run")]
+                   "--config", str(folder / "config.json"), "--output", str(folder / "working-run"),
+                   "--job-id", job_id]
         try:
             with (folder / "run.log").open("w", encoding="utf-8") as log:
                 with self.lock:

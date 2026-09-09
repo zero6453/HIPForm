@@ -1,83 +1,74 @@
-# HIPForm 仿真模型
+# HIPForm 仿真模型与当前目录验证
 
-HIPForm 接在包套生成流程之后。输入为目标成品 `cavity.step` 与包套 `capsule.step`；程序从包套推导粉末域，输出 `cavity+<jobid>.step` 并与目标独立验证。首次实现用于建立可修改、可复现的数值流程。
+`cavity.step` 是目标成品，`capsule.step` 是真实包套壁和抽气管材料。
+两文件放在工作目录，仿真从包套独立提取主内腔；目标不参与粉末域生成。
+`assembly.step` 不参与此流程。
 
-**模型状态：理想参数、未经材料试验标定、简化小应变模型。** 不将数值完成或采样公差满足限值等同于工程验收。默认终态仍附着包套，未模拟去包套后的应力释放。大应变或反算密度越界会在报告中明确提示。
+**当前为未经材料试验标定的小应变模型。** 尺寸采样通过并不构成工程验收。
+终态仍附着包套，未模拟去包套的应力释放；应变或密度超出适用范围会写入报告。
 
-## 安装与运行
+## 直接运行
 
-Python 3.12，依赖全部通过 Python 包安装，不依赖 FreeCAD GUI、Claude CLI 或商业求解器。Gmsh 使用其 Python wheel 中附带的原生 OpenCASCADE/网格库；scikit-fem 负责有限元组装，SciPy 负责线性代数，Trimesh 负责距离计算，Plotly 生成不需要联网的报告。
-
-```bash
-uv sync
-uv run hipform run \
-  --cavity /path/to/compensated-cavity.step \
-  --capsule /absolute/path/to/hip_capsule_complete.step \
-  --config config/hip-ideal.yaml \
-  --output simulation-runs/actual-001
-```
-
-必须使用包套材料本体文件，不能把包含型腔与包套的装配 STEP 传给 `--capsule`。输出目录必须为空，避免覆盖已有结果。`run` 返回 0 表示流程完成，返回 2 表示配置、几何或求解失败；公差状态另见 `result.json` 的 `sampled_tolerance_status`。
-
-只准备网格和面编号，将 `run` 换成 `mesh`。先查看生成的 `mesh-info.json` 中 `reference_faces`（面类型、中心坐标和面积），再把角度区域面编号填进 `angular_face_ids`。这些是 Gmsh 布尔分割后的面编号，不是 FreeCAD 的 FaceN；输入几何或封口变化后须重新核对。
-
-仓库不包含原项目的 STEP。无需外部输入的公开演示使用 `uv run python scripts/run_demo.py`。如果已有可用型腔，以下命令也可生成明确标注的演示包套，验证完整程序：
+安装依赖后，在包含两个 STEP 的目录运行：
 
 ```bash
-uv run hipform example \
-  --cavity /path/to/compensated-cavity.step \
-  --output simulation-runs/example-input
-uv run hipform run \
-  --cavity /path/to/compensated-cavity.step \
-  --capsule simulation-runs/example-input/synthetic-capsule.step \
-  --config config/hip-ideal.yaml \
-  --output simulation-runs/example-run
+hipform verify
 ```
 
-示例包套是扩展包围盒减去型腔，最小边界余量默认 3 mm；它局部很厚，不代表 HIP-demo 生成的随形薄壁包套。报告记录合成来源和文件哈希，不可将其结果套用到实际包套。
+自动生成独立任务目录 `simulation-runs/<jobid>`，其中包含 `report.html` 和
+`cavity+<jobid>.step`。可用 `--config hip-process.json` 指定工艺，或用
+`--output simulation-runs/example-001` 指定空结果目录；已有结果不会被覆盖。
+命令返回 0 表示计算与报告完成，2 表示执行失败；尺寸是否通过另见
+`result.json.validation_status`，失败也保留已完成的预测模型和修改建议。
 
-## 可修改的默认参数
+API 同样直接读取服务启动目录的两个固定文件，任务只需要 `config` 或 `config_id`。
+使用 `hipform serve` 启动，打开 <http://127.0.0.1:8000/docs>；无需上传或逐次传入文件路径。
+配置和 STEP 在入队时快照，后续替换工作目录文件不影响已提交任务。
+详见 [API 使用说明](api.md)。
 
-主配置：`config/hip-ideal.yaml`。单位统一为 mm、MPa、s、摄氏度；计算 Arrhenius 项时转为开尔文。STEP 声明单位由 OpenCASCADE 归一化成 mm。配置不接受未知字段、非有限值和不合理的时间顺序。
+## 默认工艺与材料
 
-| 项目 | 默认值 | 配置位置 |
+| 项目 | 默认值 | 作用 |
 |---|---|---|
-| 初始粉末相对密度 | 0.65 | `powder.initial_relative_density` |
-| 自由致密化极限密度 | 0.995 | `powder.limiting_relative_density` |
-| TC4 全致密材料密度 | 4.43e-6 kg/mm³ | `powder.solid_density_kg_per_mm3` |
-| 峰值温度 | 920°C | `cycle` |
-| 峰值压力 | 100 MPa | `cycle` |
-| 升温加压 | 60 min | `cycle` |
-| 保温保压 | 120 min | `cycle` |
-| 降温后卸压 | 总历程 270 min | `cycle` |
-| 网格目标尺寸 | 6 mm | `solver.mesh_size_mm` |
-| 最大时间步 | 120 s | `solver.time_step_s` |
-| 小应变提示阈值 | 5% | `solver.strain_warning_threshold` |
-| 普通区域偏差绝对值 | 10 mm | `tolerances.flat_mm` |
-| 指定角度区域偏差绝对值 | 20 mm | `tolerances.angular_mm` |
-| 角度区域 | 初始为空 | `tolerances.angular_face_ids` |
+| 包套 | 20 号钢，屈服 250 MPa、抗拉 400 MPa | 用户提供的名义强度，仅记录，不作为高温塑性本构 |
+| 粉末 | TC4，烧结态屈服 800 MPa、抗拉 950 MPa | 用户提供的名义强度，仅记录 |
+| 初始相对密度 | 0.65 | 实际参与动力学和体积关系 |
+| 典型终态密度 | 0.97 | 工艺参考，不强制写成计算结果 |
+| 典型体积收缩 | 0.30 | 工艺参考，不替代求解得到的体积变化 |
+| 工艺平台 | 900℃、120 MPa、10800 s | 3 小时保温保压 |
+| 升温 / 冷却 | 1 小时 / 1.5 小时 | 未由用户指定，默认假设，可修改 |
+| 规定自由致密化上限 | 0.995 | 未标定动力学参数 |
+| 全致密 TC4 密度 | 4.43e-6 kg/mm³ | 质量计算 |
+| 网格尺寸 / 时间步 | 6 mm / 120 s | 可配置；管孔局部按曲率加密 |
+| 表面采样间距 | 3 mm | 可配置，超出预算报错，不自动加粗 |
 
-全部温压点可以增删，分段线性插值，求解时间网格保留所有工况转折点。默认材料参数是展示用途的假设，不是可追溯材料库。高温弹性模量、热膨胀系数、致密化速率和活化能、压力指数、包套应力松弛时间都可以修改。提高提示阈值不会使小应变理论适用于大应变。
+完整默认配置在 `config/hip-ideal.yaml`，`hipform init --output process.yaml`
+可生成相同配置。温压按 `cycle` 分段线性插值，单位为 s、℃、MPa，几何为 mm。
+材料高温模量、热膨胀、致密化速率/活化能和包套松弛数据尚待标定。
+强度字段不能确定 900℃ 下多孔塑性或蠕变。
 
-## 封口与界面
+按质量守恒，0.65 到 0.97 对应体积收缩 32.99%、线性收缩约 12.49%，
+与“约 30%”可作数量级对照，但不能同时把两者作为精确约束。
 
-HIP-demo 生成的包套可能保留抽气通孔，进入 HIP 需要封口。本原型检测到粉末与外部连通时拒绝求解。可以输入已经封口的 STEP，或配置一个沿 +Z 的圆柱封口实体：
+## 内腔、封口与材料界面
 
-```yaml
-seal:
-  center_mm: [0.0, 0.0, 150.0]
-  radius_mm: 4.0
-  height_mm: 2.0
+程序识别直圆抽气管的圆环管口，用实际轴向在管口向外添加虚拟封口。
+封口厚度取该管径向壁厚，并记录位置、轴向和尺寸；源包套不修改。
+新验证流程要求 `seal: null`、`angular_face_ids: []`；非默认旧参数会明确拒绝，不会静默忽略。
+从封口后的真实材料求封闭空域，去除可识别的管腔残余，得到填满主内腔的粉末域。
+预封口直管和封闭无管壳体也受支持；不认识的开口或多个内腔明确失败。
+没有通过目标包围盒重造包套，不预设其壁厚为 2 mm。
+
+粉末与包套完全贴合，共用界面节点。CAD 材料间隙仍返回 `material_gap`：
+
+```text
+Assembly contains disconnected material bodies in the mesh.
 ```
 
-以上坐标仅说明格式，必须按实际抽气管修改。`center_mm` 是圆柱底面圆心。程序要求封口与包套合并为同一实体且不侵入粉末域；失败会保留错误记录。仅外包络施加压力，密闭残余空腔按真空零表压处理。
-
-材料间隙和抽气孔开放现在优先按 CAD 拓扑检查，不依赖粗网格是否能保留细小通孔。
-粉末与包套完全分离或局部不贴合返回 `material_gap`；抽气孔开放返回 `open_capsule`。
-与粉末相接的残余空腔只允许识别为封口直圆管的内部空间，复杂管道几何会保守拒绝。
-完整规则、错误报告及 Swagger 接口见 [API 使用说明](api.md)。
-
-粉末与包套共用界面节点，采用完全贴合、不允许滑移的理想化条件。没有摩擦滑移、界面分离、气体泄漏、焊缝强度、热传导梯度、屈曲和破裂模型。小应变线性四面体在薄壁弯曲和近不可压缩状态下也会产生额外离散误差。
+只有可识别的密闭抽气管残余例外，残余空间不加载外压。
+开放、不受支持的形状不能通过跳过密封检查来继续仿真。
+此流程默认主内腔填满粉末，不能识别 CAD 未提供的实际装填缺陷。
+没有摩擦滑移、分离、焊缝强度、气体泄漏、温度梯度、屈曲或破裂模型。
 
 ## 数学模型
 
@@ -95,54 +86,42 @@ epsilon_free = (D_initial / D)^(1/3) - 1
 
 程序分别保存“规定自由收缩密度”和由 `det(I + grad(u))` 反算的实际相对密度，后者考虑热膨胀后的全致密参考密度。两者不必相同，不能把动力学达到 0.995 误报为实际构件处处达到 0.995。质量指标是从同一体积关系重构的内部一致性检查，不能独立证明物理模型正确。反算值不裁剪到 1，便于暴露模型越界。负 Jacobian 直接导致失败。
 
-## 公差与输出
+## 成品比较与输出
 
-验证比较 **预测 `cavity+<jobid>.step` 与目标 `cavity.step`**。有符号偏差小于 0 表示欠尺寸，平面允许 0～10 mm，非平面允许 0～20 mm；失败报告给出上游重新生成包套的建议。
-
-参考面未显式归入角度区时一律使用 10 mm，角度区使用 20 mm。斜面也可能是几何平面，所以不凭“是否平面”自动分组。使用双向采样点到三角面距离，输出各区最大值、P95、RMS 和最大偏差坐标；反向区域归属由最近参考面确定。采样间距可配置，超过采样预算会失败，不会偷偷降低精度。
+目标独立三角化，并依据 STEP 面类型分类：`Plane` 使用 0～10 mm，其余面使用
+0～20 mm（可通过配置调整上限）。双向采样，负值表示预测材料欠尺寸，正值表示余量。
+既检查预测到目标，也检查目标到预测，保留欠尺寸和超限位置；无最佳拟合或缩放。
+只有浮点数值误差使用已记录的极小 epsilon，不能掩盖真实欠尺寸。
+采样距离仍受网格和采样间距影响，不证明连续 CAD 的公差极值。
 
 | 文件 | 用途 |
 |---|---|
-| `report.html` | 离线可旋转三维叠加、偏差云图、温压与密度历程 |
-| `predicted-powder.stl` | 预测粉末成形表面，单位 mm |
-| `predicted-assembly.vtu` | 包套和粉末终态体网格、位移和相对密度 |
-| `reference-powder.stl` | 从初始 CAD 离散得到的参考粉末表面 |
-| `history.csv` | 温度、压力、密度、体积、位移及数值残差 |
-| `comparison.json` | 双向表面采样偏差、分区限值与判定 |
-| `mesh-info.json` | 材料、面编号、输入哈希、CAD/网格体积误差 |
-| `config.resolved.json` | 本次完整配置快照 |
-| `solver.json` / `result.json` | 模型适用范围、执行状态和工程验收未评估声明 |
+| `report.html` | 离线三维对比、公差表、温压密度曲线、限制和上游建议 |
+| `cavity+<jobid>.step` | 完整预测表面的三角面 BREP STEP，可重新导入为实体，无自动减面 |
+| `predicted-powder.stl` | 同一预测表面，导入软件时选择 mm |
+| `predicted-assembly.vtu` | 包套和粉末终态体网格 |
+| `derived-cavity-<jobid>.step` | 从包套提取的初始粉末域，供本地追溯 |
+| `sealed-capsule-<jobid>.step` | 保留真实壁/管并加虚拟封口的仿真副本 |
+| `comparison.json` | 有符号距离、采样设置、各区极值和位置 |
+| `upstream-advice.json` | 机器可读的欠尺寸/超限原因和终态局部修正建议 |
+| `history.csv` / `solver.json` | 温压、规定密度、体积反算密度、残差和模型适用性 |
+| `config.resolved.json` | 本次工艺材料参数快照 |
+| `mesh-info.json` / `result.json` | 源文件哈希、提取/封口证据、执行与尺寸状态 |
 
-STL 没有内置单位属性，导入其他软件时选择 mm。当前不输出重建 STEP，避免把三角面拟合引入的误差与成形误差混淆。采样最大值不是连续 CAD 表面最大值；先检查 CAD/网格体积误差，再逐步细化网格、时间步和表面采样以评估变化。
+STEP 是网格的真实面片实体，不是恢复参数化设计的光滑曲面。
+上游建议中的修正值表示**终态局部表面**回到允许区间所需距离，不是钢壁厚或直接 CAD 偏置。
+调整包套主内腔收缩补偿后需要重新计算。
 
-## 验证
-
-```bash
-uv run pytest -q
-```
-
-新增测试覆盖自由收缩的质量关系、零载荷、均匀本征应变、静水压力解析解、Maxwell 系数、时间节点、错误配置、密封检查、材料分区、表面双向距离与 10/20 mm 阈值。它们验证代码和离散计算，不替代材料试验或真实 HIP 工艺验证。
-
-分别改变网格和时间步的数值敏感性检查：
+## 验证和旧演示
 
 ```bash
-uv run python scripts/check_hip_sensitivity.py \
-  --cavity /path/to/compensated-cavity.step \
-  --capsule simulation-runs/example-input/synthetic-capsule.step \
-  --config config/hip-ideal.yaml \
-  --output simulation-runs/study-001
+python -m pytest -q
 ```
 
-该脚本分别运行配置值、较粗网格、较大时间步三组算例，输出 `sensitivity.json`。这是敏感性记录，不自动宣称网格收敛。默认理想参数下示例产生较大局部应变和部分相对密度超过 1，报告明确标为超出适用范围；即使采样偏差小于 10 mm，也不能据此验收实际 HIP 成形。
+测试覆盖独立内腔、管口封口、旋转和平移、STEP 再导入、密封与材料连接、
+有符号尺寸及采样预算、数值解析解、API 快照/恢复/报告。
+这些验证程序行为，不替代高温材料试验或真实成形数据。
 
-直接从数值数组生成静态预览（额外安装 Matplotlib）：
-
-```bash
-uv run --with matplotlib python scripts/render_hip_preview.py simulation-runs/example-run
-```
-
-默认比较采用距离绝对值，因此向内、向外偏差都允许落在上限以内；需要单侧公差时须改用明确的有符号距离和区域法线约定。
-
-## 网页报告
-
-运行 `uv run hipform publish --run simulation-runs/public-demo/run --output site` 可将完整结果导出为 GitHub Pages 网站。发布器保留所有模型适用性和工程验收未评估提示。部署与更新方法见 [Pages 说明](pages.md)。
+`hipform run/mesh` 保留原数值研究接口，其 `--cavity` 仍指初始粉末域，
+与新 `verify` 的目标成品含义不同。`scripts/run_demo.py`、`hipform example` 与
+`scripts/check_hip_sensitivity.py` 用于旧演示/网格敏感性研究；API 不再自动切回旧语义。

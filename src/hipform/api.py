@@ -4,14 +4,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import Field, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings, SimulationConfig
-from .inputs import StepTooLarge
 from .jobs import JobStore
 
 
@@ -35,27 +34,14 @@ class DefaultConfigResponse(Settings):
 
 class JobRequest(Settings):
     name: str = Field(default="HIP simulation", min_length=1, max_length=120)
-    workflow: Literal["auto", "verify", "legacy"] = Field(default="auto", description="verify compares predicted cavity+jobid.step to target cavity.step; auto selects verify for vented capsules")
-    cavity_path: Path | None = Field(default=None, description="Absolute target finished-part cavity.step path on the API host")
-    capsule_path: Path | None = Field(default=None, description="Absolute capsule.step wall and vent path on the API host")
-    input_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$",
-                                description="ID returned by POST /api/inputs; replaces both local paths")
     config: SimulationConfig | None = Field(default=None, description="Inline process/material configuration; saved as an immutable job snapshot")
     config_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$",
                                  description="Saved configuration ID; mutually exclusive with inline config")
 
     @model_validator(mode="after")
-    def sources(self):
+    def config_source(self):
         if (self.config is None) == (self.config_id is None):
             raise ValueError("Provide exactly one of config or config_id")
-        if self.input_id:
-            if self.cavity_path is not None or self.capsule_path is not None:
-                raise ValueError("input_id cannot be combined with local STEP paths")
-        elif self.cavity_path is None or self.capsule_path is None:
-            raise ValueError("Provide both cavity_path and capsule_path, or input_id")
-        for path in (self.cavity_path, self.capsule_path):
-            if path is not None and not path.is_absolute():
-                raise ValueError("Local STEP paths must be absolute paths on the API host")
         return self
 
 
@@ -74,7 +60,7 @@ class JobResponse(Settings):
     started_at: str | None = None
     completed_at: str | None = None
     config_id: str | None = None
-    workflow: Literal["auto", "verify", "legacy"] = "auto"
+    workflow: Literal["auto", "verify", "legacy"] = "legacy"
     config: SimulationConfig
     inputs: dict = Field(default_factory=dict)
     error: JobError | None = None
@@ -85,14 +71,9 @@ class JobResponse(Settings):
     artifacts: dict[str, str] = Field(default_factory=dict)
 
 
-class InputResponse(Settings):
-    id: str
-    created_at: str
-    filenames: dict[str, str]
-
-
-def create_app(data_dir: Path | None = None, *, job_timeout_s=3600):
-    store = JobStore(data_dir or Path("simulation-runs/api"), timeout_s=job_timeout_s)
+def create_app(data_dir: Path | None = None, *, job_timeout_s=3600, source_dir: Path | None = None):
+    store = JobStore(data_dir or Path("simulation-runs/api"), timeout_s=job_timeout_s,
+                     source_dir=source_dir or Path.cwd())
 
     @asynccontextmanager
     async def lifespan(app):
@@ -103,7 +84,7 @@ def create_app(data_dir: Path | None = None, *, job_timeout_s=3600):
             store.close()
 
     app = FastAPI(title="HIPForm Simulation API", version="0.1.0", lifespan=lifespan,
-                  description="CAD-to-HIP simulation: upload STEP inputs, configure TC4/material data and "
+                  description="CAD-to-HIP simulation: reads cavity.step and capsule.step from the service source directory, configures TC4/material data and "
                   "temperature/pressure/time points, submit an asynchronous job, then retrieve its report. "
                   "The model is uncalibrated; a completed job is not engineering acceptance. "
                   "Local single-worker service. All dimensions are mm, stress/pressure MPa, time s, temperature Celsius.")
@@ -112,7 +93,7 @@ def create_app(data_dir: Path | None = None, *, job_timeout_s=3600):
 
     @app.middleware("http")
     async def require_same_origin(request, call_next):
-        # HTML forms can send multipart uploads cross-origin without CORS permission.
+        # Browsers must not trigger local writes from unrelated sites.
         origin = request.headers.get("origin")
         if request.method not in {"GET", "HEAD", "OPTIONS"} and origin is not None:
             if origin != str(request.base_url).removesuffix("/"):
@@ -134,6 +115,8 @@ def create_app(data_dir: Path | None = None, *, job_timeout_s=3600):
 
     def present(job):
         result = dict(job)
+        result["inputs"] = {role: {key: value for key, value in record.items() if key != "source_path"}
+                            for role, record in job.get("inputs", {}).items()}
         base = f'/api/jobs/{job["id"]}'
         result["status_url"] = base
         artifacts = store.available_artifacts(job)
@@ -179,36 +162,23 @@ def create_app(data_dir: Path | None = None, *, job_timeout_s=3600):
         except KeyError:
             raise HTTPException(404, "Configuration not found") from None
 
-    @app.post("/api/inputs", status_code=201, response_model=InputResponse, tags=["Inputs"],
-              summary="Upload cavity.step and capsule.step (maximum 100 MiB each)")
-    def upload_inputs(cavity: Annotated[UploadFile, File(description="Target finished-part cavity.step")],
-                      capsule: Annotated[UploadFile, File(description="Capsule wall and vent capsule.step")]):
-        try:
-            return store.save_inputs({role: (upload.filename or "", upload.file)
-                                      for role, upload in {"cavity": cavity, "capsule": capsule}.items()})
-        except StepTooLarge as exc:
-            raise HTTPException(413, str(exc)) from exc
-        except (ValueError, OSError) as exc:
-            raise HTTPException(422, str(exc)) from exc
-
     @app.post("/api/jobs", status_code=202, response_model=JobResponse, tags=["Simulations"],
-              summary="Queue a simulation with STEP inputs and an explicit configuration source",
-              description="Provide input_id OR two absolute STEP paths; provide config OR config_id. "
+              summary="Queue verification using cavity.step and capsule.step in the service source directory",
+              description="The service reads exactly cavity.step and capsule.step from its configured source directory. Provide config OR config_id. "
                   "cavity.step is the finished target; powder is derived from capsule.step and the straight vent is virtually capped. "
                   "A geometry gap fails the job with code material_gap. "
               "Accepted jobs return immediately; poll status_url. Both successful and failed jobs have report_url.")
     def submit_job(request: Annotated[JobRequest, Body(openapi_examples={
-        "local_steps": {"summary": "Local STEP paths with inline process parameters",
-                        "value": {"name": "HIP verification", "cavity_path": "/absolute/path/cavity.step",
-                                  "capsule_path": "/absolute/path/capsule.step",
-                                  "config": SimulationConfig().model_dump(mode="json")}},
-        "uploaded_steps": {"summary": "Uploaded files and saved configuration",
-                           "value": {"input_id": "REPLACE_WITH_INPUT_ID", "config_id": "REPLACE_WITH_CONFIG_ID"}},
+        "current_folder": {"summary": "当前目录 cavity.step + capsule.step",
+                            "value": {"name": "HIP verification",
+                                      "config": {}}},
+        "saved_config": {"summary": "使用已保存工艺配置",
+                          "value": {"name": "HIP verification", "config_id": "REPLACE_WITH_CONFIG_ID"}},
     })]):
         try:
             return present(store.submit(request))
         except KeyError:
-            raise HTTPException(404, "Input or configuration ID not found") from None
+            raise HTTPException(404, "Configuration ID not found") from None
         except (OSError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
         except RuntimeError as exc:

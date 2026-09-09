@@ -4,8 +4,10 @@ import argparse
 import csv
 import hashlib
 import json
+import re
 import sys
 import time
+import uuid
 from pathlib import Path
 import numpy as np
 
@@ -52,6 +54,12 @@ def _export_result(output, mesh, result):
 def _run(args):
     from .geometry import build_mesh
 
+    verifying = args.command == "verify"
+    job_id = (args.job_id or uuid.uuid4().hex) if verifying else None
+    if verifying and not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise ValueError("job-id must be 32 lowercase hexadecimal characters")
+    if args.output is None:
+        args.output = Path("simulation-runs") / job_id
     output = args.output.resolve()
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError(f"Output directory is not empty: {output}; choose a new run directory")
@@ -60,6 +68,9 @@ def _run(args):
     stage = "configuration"
     try:
         config = load_config(args.config)
+        if verifying and (config.seal is not None or config.tolerances.angular_face_ids):
+            raise ValueError("verify uses automatic vent sealing and target CAD face classification; "
+                             "seal must be null and tolerances.angular_face_ids must be empty (legacy run options)")
         payload = config.model_dump(mode="json")
         _json(output / "config.resolved.json", payload)
         stage = "geometry"
@@ -68,7 +79,9 @@ def _run(args):
         derived = None
         if args.command == "verify":
             from .cad_workflow import derive_powder_domain, mesh_step_surface
-            job_id = args.job_id or hashlib.sha256(f"{time.time_ns()}".encode()).hexdigest()[:12]
+            from .inputs import file_info, load_provenance
+            inputs = {"cavity": file_info(args.cavity), "capsule": file_info(args.capsule)}
+            provenance = load_provenance(args.capsule, inputs["capsule"]["sha256"])
             derived = derive_powder_domain(args.capsule, output / f"derived-cavity-{job_id}.step",
                                            output / f"sealed-capsule-{job_id}.step")
             target = mesh_step_surface(args.cavity, config.solver.mesh_size_mm)
@@ -79,6 +92,13 @@ def _run(args):
             seal = config.seal.model_dump() if config.seal else None
         mesh = build_mesh(powder_path, capsule_path, config.solver.mesh_size_mm,
                           seal)
+        if verifying:
+            mesh.metadata["inputs"] = inputs
+            mesh.metadata["input_roles"] = {"cavity": "finished_part_target", "capsule": "original_capsule_material"}
+            mesh.metadata["preparation"] = {key: str(value) if isinstance(value, Path) else value
+                                            for key, value in derived.items()}
+            if provenance is not None:
+                mesh.metadata.update(provenance=provenance, synthetic_example=bool(provenance.get("synthetic_example")))
         _save_mesh(output, mesh)
         print(f"Mesh: {len(mesh.points)} nodes, {len(mesh.tetrahedra)} tetrahedra", flush=True)
         if args.command == "mesh":
@@ -100,6 +120,8 @@ def _run(args):
         stage = "solver"
         result = simulate(mesh, config, progress)
         _export_result(output, mesh, result)
+        _json(output / "solver.json", {"metadata": result.metadata, "warnings": result.warnings,
+                                      "history": result.history})
         stage = "comparison"
         tolerance = config.tolerances
         if args.command == "verify":
@@ -111,13 +133,24 @@ def _run(args):
             export_faceted_step((mesh.points + result.displacement)[predicted_nodes], inverse.reshape(-1, 3), predicted_step)
             comparison = compare_target_surfaces(target[0], target[1],
                 (mesh.points + result.displacement)[predicted_nodes], inverse.reshape(-1, 3), target[2],
-                sample_spacing_mm=max(tolerance.sample_spacing_mm, config.solver.mesh_size_mm), max_samples=tolerance.max_samples,
-                planar_limit_mm=10, nonplanar_limit_mm=20)
+                sample_spacing_mm=tolerance.sample_spacing_mm, max_samples=tolerance.max_samples,
+                planar_limit_mm=tolerance.flat_mm, nonplanar_limit_mm=tolerance.angular_mm)
             _json(output / "comparison.json", comparison)
-            write_verification_report(output / "report.html", comparison, payload, {"derived": derived, "target": str(args.cavity), "predicted_step": predicted_step.name})
+            _json(output / "upstream-advice.json", {"job_id": job_id, "status": comparison["status"],
+                  "recommendations": comparison["upstream_regeneration_advice"]})
+            stage = "report"
+            write_verification_report(output / "report.html", comparison, payload,
+                {"job_id": job_id, "target": str(args.cavity), "predicted_step": predicted_step.name},
+                mesh=mesh, result=result, target=target)
             summary = {"execution_status": "completed", "validation_status": comparison["status"],
+                       "job_id": job_id, "calibrated": False, "model_validity": result.metadata["model_validity"],
+                       "final_state": result.metadata["final_state"], "final_metrics": result.history[-1],
                        "engineering_acceptance": "not_assessed", "comparison_basis": "predicted cavity+jobid.step versus target cavity.step",
                        "predicted_step": predicted_step.name, "upstream_regeneration_advice": comparison["upstream_regeneration_advice"],
+                       "volume_shrinkage_fraction": 1 - result.history[-1]["powder_volume_mm3"] / result.history[0]["powder_volume_mm3"],
+                       "config_sha256": hashlib.sha256((output / "config.resolved.json").read_bytes()).hexdigest(),
+                       "artifacts": {"report": "report.html", "predicted_step": predicted_step.name,
+                           "comparison": "comparison.json", "advice": "upstream-advice.json", "history": "history.csv"},
                        "geometry": mesh.metadata, "elapsed_s": round(time.monotonic()-started, 2), "warnings": result.warnings + comparison["warnings"]}
             _json(output / "result.json", summary)
             print(f"Report: {output / 'report.html'}")
@@ -129,8 +162,6 @@ def _run(args):
             angular_mm=tolerance.angular_mm, angular_face_ids=tolerance.angular_face_ids,
             sample_spacing_mm=tolerance.sample_spacing_mm, max_samples=tolerance.max_samples)
         _json(output / "comparison.json", comparison)
-        _json(output / "solver.json", {"metadata": result.metadata, "warnings": result.warnings,
-                                      "history": result.history})
         stage = "report"
         write_report(output / "report.html", mesh, result, comparison, payload)
         summary = {"execution_status": "completed", "calibrated": False,
@@ -165,6 +196,7 @@ def main(argv=None) -> int:
     serve.add_argument("--host", default="127.0.0.1", choices=["127.0.0.1", "localhost"])
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--data-dir", type=Path, default=Path("simulation-runs/api"))
+    serve.add_argument("--input-dir", type=Path, default=Path("."), help="Directory containing cavity.step and capsule.step")
     serve.add_argument("--job-timeout", type=float, default=3600,
                        help="Maximum seconds per solver process (default: 3600)")
     publish = commands.add_parser("publish", help="Export a completed run for GitHub Pages")
@@ -178,10 +210,10 @@ def main(argv=None) -> int:
     example.add_argument("--wall-mm", type=float, default=3.0)
     for name in ("mesh", "run", "verify"):
         command = commands.add_parser(name)
-        command.add_argument("--cavity", type=Path, required=True)
-        command.add_argument("--capsule", type=Path, required=True)
+        command.add_argument("--cavity", type=Path, default=Path("cavity.step"), required=name != "verify")
+        command.add_argument("--capsule", type=Path, default=Path("capsule.step"), required=name != "verify")
         command.add_argument("--config", type=Path)
-        command.add_argument("--output", type=Path, required=True)
+        command.add_argument("--output", type=Path, required=name != "verify")
         if name == "verify":
             command.add_argument("--job-id", help="Stable identifier used in cavity+<jobid>.step")
     args = parser.parse_args(argv)
@@ -191,7 +223,7 @@ def main(argv=None) -> int:
             import uvicorn
             if not 1 <= args.port <= 65535 or not 0 < args.job_timeout < float("inf"):
                 raise ValueError("port must be 1-65535 and job-timeout must be positive and finite")
-            uvicorn.run(create_app(args.data_dir, job_timeout_s=args.job_timeout), host=args.host, port=args.port)
+            uvicorn.run(create_app(args.data_dir, job_timeout_s=args.job_timeout, source_dir=args.input_dir), host=args.host, port=args.port)
             return 0
         if args.command == "publish":
             from .publishing import publish_run

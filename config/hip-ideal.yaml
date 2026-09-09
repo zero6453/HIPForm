@@ -1,8 +1,11 @@
-# IDEALIZED DEMO VALUES, NOT CALIBRATED TC4/20 STEEL MATERIAL DATA.
+# Strengths are supplied nominal values; high-temperature kinetics remain uncalibrated.
+# Heating 1 h, hold 3 h, cooling 1.5 h. Only the hold was specified by the user.
 schema_version: 1
 model: small_strain_thermoviscoelastic_densification_surrogate
 powder:
-  name: TC4 idealized powder (uncalibrated)
+  name: TC4 titanium alloy powder
+  yield_strength_mpa: 800.0
+  tensile_strength_mpa: 950.0
   initial_relative_density: 0.65
   limiting_relative_density: 0.995
   solid_density_kg_per_mm3: 4.43e-06
@@ -16,8 +19,12 @@ powder:
   densification_rate_per_s: 0.0006
   activation_energy_j_per_mol: 150000.0
   pressure_exponent: 1.5
+  expected_final_relative_density: 0.97
+  typical_volume_shrinkage_fraction: 0.3
 capsule:
-  name: 20 steel idealized Maxwell solid (uncalibrated)
+  name: 20 steel
+  yield_strength_mpa: 250.0
+  tensile_strength_mpa: 400.0
   young_modulus_mpa: 200000.0
   hot_young_modulus_mpa: 25000.0
   poisson_ratio: 0.3
@@ -42,15 +49,15 @@ cycle:
   temperature_c: 20.0
   pressure_mpa: 0.0
 - time_s: 3600.0
-  temperature_c: 920.0
-  pressure_mpa: 100.0
-- time_s: 10800.0
-  temperature_c: 920.0
-  pressure_mpa: 100.0
+  temperature_c: 900.0
+  pressure_mpa: 120.0
 - time_s: 14400.0
+  temperature_c: 900.0
+  pressure_mpa: 120.0
+- time_s: 18000.0
   temperature_c: 200.0
-  pressure_mpa: 100.0
-- time_s: 16200.0
+  pressure_mpa: 120.0
+- time_s: 19800.0
   temperature_c: 20.0
   pressure_mpa: 0.0
 seal: null

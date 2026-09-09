@@ -215,19 +215,53 @@ P95 和 RMS 使用等样本权重；采样结果与网格相关，不证明连�
     output_path.write_text(document, encoding="utf-8")
 
 
-def write_verification_report(output_path, comparison, config, metadata):
-    """Write the independent target-versus-prediction verification summary."""
-    status = comparison.get("status", "failed")
-    advice = "".join(f"<li>{_escape(item.get('region'))}: {_escape(item.get('action'))} ({_escape(item.get('reason'))})</li>"
-                     for item in comparison.get("upstream_regeneration_advice", []))
-    rows = "".join(f"<tr><td>{_escape(name)}</td><td>{_escape(region.get('status'))}</td>"
-                   f"<td>{_number(region.get('min_signed_mm'))}</td><td>{_number(region.get('max_signed_mm'))}</td>"
-                   f"<td>{_number(region.get('tolerance_mm'))}</td></tr>"
-                   for name, region in comparison.get("regions", {}).items())
-    document = f"<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>HIPForm verification</title>"
-    document += f"<style>body{{font:15px Arial;max-width:960px;margin:32px auto;line-height:1.6}}table{{border-collapse:collapse}}td,th{{padding:8px 14px;border-bottom:1px solid #ddd;text-align:left}}.status{{font-weight:bold;color:{'#166534' if status == 'passed' else '#b91c1c'}}}</style>"
-    document += f"<h1>HIPForm 成品验证</h1><p class='status'>结果：{_escape(status)}</p>"
-    document += "<p>预测 cavity+jobid.step 与目标 cavity.step 在源坐标中比较。负值表示欠尺寸；平面限值 0～10 mm，非平面限值 0～20 mm。</p>"
-    document += f"<table><tr><th>区域</th><th>状态</th><th>最小有符号偏差(mm)</th><th>最大有符号偏差(mm)</th><th>限值(mm)</th></tr>{rows}</table>"
-    document += f"<h2>上游包套再生成建议</h2><ul>{advice or '<li>无需修改</li>'}</ul><h2>模型与输入</h2><pre>{_json({'config': config, 'metadata': metadata, 'comparison': comparison})}</pre></html>"
+def write_verification_report(output_path, comparison, config, metadata, *, mesh, result, target):
+    """Offline independent target comparison, process curves and numeric advice."""
+    status = comparison["status"]
+    field = np.asarray(comparison["fields"]["predicted_triangle_signed_mm"])
+    extent = max(float(np.abs(field).max()), 1e-9)
+    figure = go.Figure()
+    for name, points, triangles, style in (
+        ("目标 cavity.step", target[0], target[1], {"color": "#8899aa", "opacity": .28}),
+        ("预测成品", mesh.points + result.displacement, mesh.powder_triangles,
+         {"intensity": field, "intensitymode": "cell", "colorscale": "RdBu", "cmin": -extent,
+          "cmax": extent, "colorbar": {"title": "有符号偏差 mm"}}),
+    ):
+        figure.add_trace(go.Mesh3d(x=points[:, 0], y=points[:, 1], z=points[:, 2],
+            i=triangles[:, 0], j=triangles[:, 1], k=triangles[:, 2], name=name, flatshading=True, **style))
+    figure.update_layout(template="plotly_white", height=560, margin={"t": 10, "l": 0, "r": 0, "b": 20},
+                         scene={"aspectmode": "data", "xaxis_title": "X mm", "yaxis_title": "Y mm", "zaxis_title": "Z mm"})
+    surface = pio.to_html(figure, full_html=False, include_plotlyjs=True, config={"responsive": True})
+    history = pio.to_html(_history_figure(result), full_html=False, include_plotlyjs=False, config={"responsive": True})
+    names = {"planar": "平面", "nonplanar": "非平面"}
+    rows = []
+    for name, region in comparison["regions"].items():
+        verdict = {"no_samples": "目标无此类面", "within_limits": "采样通过", "exceeds_limits": "失败"}[region["status"]]
+        rows.append("<tr>" + "".join(f"<td>{_escape(value)}</td>" for value in (
+            names[name], verdict, _number(region.get("min_signed_mm")), _number(region.get("max_signed_mm")),
+            f"0 ～ {_number(region['tolerance_mm'])}")) + "</tr>")
+    advice = "".join(f"<li>{_escape(item['action'])}；终态局部修正量：{_number(item['required_surface_correction_mm'])} mm。"
+                     f"<pre>{_json(item['location'])}</pre></li>" for item in comparison["upstream_regeneration_advice"])
+    warnings = "".join(f"<li>{_escape(warning)}</li>" for warning in result.warnings + comparison["warnings"])
+    details = {"config": config, "metadata": metadata, "geometry": mesh.metadata, "solver": result.metadata,
+               "comparison": {key: value for key, value in comparison.items() if key != "fields"}}
+    validity = "超出小应变或密度适用范围" if result.metadata.get("model_validity") == "outside_small_strain_or_density_range" else "未经材料试验标定"
+    document = f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>HIPForm 成品验证报告</title>
+<style>body{{font:15px/1.65 Arial,'PingFang SC',sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;color:#24313e}}
+table{{border-collapse:collapse;width:100%}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}
+pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f8;padding:12px}}.status{{font-weight:bold;color:{'#166534' if status == 'passed' else '#b91c1c'}}}</style></head><body>
+<h1>HIPForm 成品验证报告</h1><p class="status">尺寸判定：{'采样通过' if status == 'passed' else '失败'}</p>
+<p><strong>模型状态：{validity}；工程验收未评估。</strong>终态仍附着包套，未模拟去包套后的应力释放。</p>
+<p>从 capsule.step 提取粉末域，预测 {_escape(metadata['predicted_step'])}，与目标 cavity.step 在原坐标中比较。</p>
+<p>负值表示欠尺寸，正值表示余量。平面与非平面按目标 CAD 面类型分类；无对齐或缩放。</p>
+<table><tr><th>区域</th><th>判定</th><th>最小偏差 mm</th><th>最大偏差 mm</th><th>允许区间 mm</th></tr>{''.join(rows)}</table>
+<p>表面采样间距 {_number(comparison['sampling']['spacing_mm'])} mm。STEP 为完整预测网格的三角面 BREP，未简化表面。
+采样结果不证明连续 CAD 公差极值；本次为流程验证，未完成网格收敛验证。</p>
+<h2>目标与预测模型</h2>{surface}<h2>温度、压力与密度历程</h2>{history}
+<h2>上游重新生成包套的建议</h2><ul>{advice or '<li>本次采样未发现尺寸超限。</li>'}</ul>
+<p>修正量表示终态表面到允许区间的距离，需要上游调整收缩补偿后重新仿真；不直接作为壁厚或 CAD 偏置量。</p>
+<h2>模型限制</h2><ul>{warnings}</ul>
+<details><summary>配置、输入哈希、封口、数值与修改建议记录</summary><pre>{_json(details)}</pre></details>
+</body></html>"""
     Path(output_path).write_text(document, encoding="utf-8")

@@ -1,71 +1,67 @@
 # HIPForm
 
-Predict an idealized HIP forming state and compare it with a compensated cavity.
+从包套预测热等静压成品，并与目标模型比较。
 
-**[View the report](https://zero6453.github.io/HIPForm/)**
+HIPForm 直接读取工作目录中的 `cavity.step`（目标成品）和 `capsule.step`（包套材料实体），从包套推导粉末域，生成 `cavity+<job_id>.step` 和验证报告。预测零件欠尺寸为负，判定失败；平面允许 **0～10 mm**，非平面允许 **0～20 mm**。失败结果包含上游重新生成包套的建议。
 
-HIPForm 接收包套材料实体 STEP 和已补偿型腔 STEP，输出 TC4 粉末预测终态、三维偏差图和温压历程。普通区域限值为 **10 mm**，显式指定的角度区域为 **20 mm**。材料参数、温度、压力、时间与限值均可修改。
+当前版本是未经标定的小应变仿真原型。默认 HIP 工况可能超出模型适用范围；尺寸采样通过不代表真实工件验收通过。
 
-当前版本是未经标定的小应变仿真原型。默认 HIP 工况可能超出模型适用范围，网页会显示适用性状态；采样公差通过不代表真实工件验收通过。终态仍附着包套。
+## 运行当前两份 STEP
 
-## Run
+需要 Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。Ubuntu 还需安装 `libglu1-mesa`。
 
-Python 3.12+ and [uv](https://docs.astral.sh/uv/) are required. On Ubuntu, install `libglu1-mesa` for Gmsh first.
-
-CAD 生成后可通过本机 HTTP API 提交 STEP 和工艺配置，查询状态并打开报告：
+先在 HIPForm 项目目录安装依赖：
 
 ```bash
 uv sync --locked
-uv run --locked hipform serve --port 8000
 ```
 
-Swagger：<http://127.0.0.1:8000/docs>。配置、上传、异步求解及报告接口见 [API 使用说明](docs/api.md)。
+随后进入包含 `cavity.step` 与 `capsule.step` 的目录，使用已安装的 `hipform` 命令：
 
 ```bash
-uv sync --locked
-uv run hipform run \
-  --cavity /path/to/compensated-cavity.step \
-  --capsule /path/to/sealed-capsule.step \
-  --config config/hip-ideal.yaml \
-  --output simulation-runs/actual-001
+hipform verify --output simulation-runs/verify-001
 ```
 
-包套必须封闭且与粉末域兼容；`--capsule` 接收包套材料实体，不是整个装配。先用 `hipform mesh` 获取参考面编号，再配置 `tolerances.angular_face_ids`。未分配面使用 10 mm。
+如果没有将虚拟环境加入 PATH，请使用虚拟环境中的命令绝对路径。本机示例：
 
-生成一个完全合成的公开演示算例：
+```bash
+cd /Users/zeroduan/Documents/Codex/freecad
+/Users/zeroduan/Documents/GitHub/HIPForm/.venv/bin/hipform verify --output simulation-runs/verify-001
+```
+
+报告为 `simulation-runs/verify-001/report.html`，预测 STEP 为同目录的 `cavity+<job_id>.step`。重新计算时选择新的输出目录；HTTP 接口会自动为每次提交生成独立任务目录。
+
+## Swagger 与自动调用
+
+在包含两份 STEP 的目录启动服务：
+
+```bash
+hipform serve --port 8000
+```
+
+打开 Swagger：<http://127.0.0.1:8000/docs>。`POST /api/jobs` 最小请求是：
+
+```json
+{"name": "当前包套验证", "config": {}}
+```
+
+接口直接读取固定目录中的两份文件，不需要上传或逐次传 STEP 路径。上游生成成功后调用此接口，即可创建验证任务；查询任务后打开 `report_url`。默认材料为20号钢和TC4，保温保压为900℃、120 MPa、3小时，粉末初始相对密度为0.65；全部配置可通过 Swagger 查询、保存和修改。
+
+`status: completed` 表示计算完成，`result.validation_status` 表示尺寸通过或失败。尺寸失败仍保留预测 STEP、报告和 `upstream_regeneration_advice`。
+
+## 演示与文档
 
 ```bash
 uv run python scripts/run_demo.py
-```
-
-该示例使用自行构造的 L 形型腔和合成包套，不包含原 HIP-demo 项目的 STEP 或真实工件数据。
-
-## Publish Reports
-
-GitHub Pages 展示静态报告，求解在本机或 GitHub Actions 中执行。网页不提供上传 STEP 或在线求解服务。
-
-每次推送到 `main`，Actions 会运行测试，然后生成并发布演示报告。手动运行 **Publish Report** 工作流也可更新网页。
-
-发布自己的算例时，先生成网页目录并检查内容：
-
-```bash
-uv run hipform publish --run simulation-runs/actual-001 --output site
-```
-
-`site/index.html` 包含三维叠加、偏差、温压与密度曲线，以及结果下载链接。导出时仅选择报告所需文件，并将来源文件的绝对路径改成文件名。
-
-将确认可公开的 `site/` 内容复制进仓库的 `reports/latest/` 后提交并推送，工作流会改为部署这份报告；移除 `reports/latest/` 则恢复自动演示。**公开报告包含可下载的几何、配置和计算结果**，请仅提交可公开的数据。详见 [Pages 发布说明](docs/pages.md)。
-
-## Documentation
-
-- [HTTP API、Swagger 与工艺参数配置](docs/api.md)
-- [CadQuery 输出接入、自动调用与报告查看](docs/cadquery-integration.zh-CN.md)
-- [模型、配置与公差定义](docs/simulation.md)
-- [GitHub Pages 部署与更新](docs/pages.md)
-
-```bash
 uv run pytest -q
 uv build
 ```
 
-HIPForm 最初作为 [HIP-demo](https://github.com/YuShenLiu06/HIP-demo) 的独立仿真扩展开发。本仓库只包含该仿真模块，不包含原项目的 CAD 生成器、历史记录或私有 STEP。第三方依赖遵循各自许可证。
+公开演示使用合成 L 形型腔，沿用 `run` 命令的初始粉末域契约，不能作为当前包套的测试结果。**[查看公开演示报告](https://zero6453.github.io/HIPForm/)**。
+
+- [HTTP API、Swagger 与工艺配置](docs/api.md)
+- [CadQuery 接入流程和报告查看](docs/cadquery-integration.zh-CN.md)
+- [模型和数值限制](docs/simulation.md)
+- [GitHub Pages 发布说明](docs/pages.md)
+
+GitHub Pages 展示静态报告，计算在本机执行；结果不会自动公开发布。本仓库不包含上游 CAD 生成器或用户的原始 STEP。第三方依赖遵循各自许可证。
