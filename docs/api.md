@@ -23,8 +23,8 @@ Swagger 同源操作，以及不带 Origin 的 Python/HTTP 客户端调用可正
 
 提交两份毫米单位的单实体 STEP：
 
-- `cavity.step`：初始粉末所占区域，预测零件模型由该区域求解得到。
-- `capsule.step`：包套材料本体，包括已建模的抽气管；不包含参考零件实体。
+- `cavity.step`：目标成品模型，用于独立验证。
+- `capsule.step`：包套材料本体，包括抽气管；程序从中推导粉末域并虚拟封口。
 
 CAD 项目中的 `assembly.step` 适合装配查看，不能整体传给当前单材料输入。
 对于 `hip-demo-cadquery`，取成功任务 `result.json` 中的 `output_dir`，使用该目录的

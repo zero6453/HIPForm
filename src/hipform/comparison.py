@@ -221,3 +221,69 @@ def compare_surfaces(
             "Reference CAD coordinates are fixed; no alignment, best-fit transform, or scaling was applied.",
         ],
     }
+
+
+def compare_target_surfaces(
+    target_points, target_triangles, predicted_points, predicted_triangles,
+    target_face_types=None, sample_spacing_mm=3., max_samples=200000,
+    planar_limit_mm=10., nonplanar_limit_mm=20.,
+) -> dict:
+    """Compare independently tessellated target and prediction with signed offsets.
+
+    Positive means the predicted material is outside the target (oversize), and
+    negative means it is inside (undersize). Target ``Plane`` faces use 10 mm;
+    every other CAD face uses 20 mm. No alignment or rescaling is performed.
+    """
+    target_points, predicted_points = _points(target_points, "target_points"), _points(predicted_points, "predicted_points")
+    target_triangles = _indices(target_triangles, "target_triangles")
+    predicted_triangles = _indices(predicted_triangles, "predicted_triangles")
+    if target_triangles.ndim != 2 or target_triangles.shape[1] != 3 or predicted_triangles.ndim != 2 or predicted_triangles.shape[1] != 3:
+        raise ValueError("Target and predicted triangles must have shape (n, 3)")
+    target_mesh = trimesh.Trimesh(target_points, target_triangles, process=False)
+    predicted_mesh = trimesh.Trimesh(predicted_points, predicted_triangles, process=False)
+    if not target_mesh.is_watertight or not predicted_mesh.is_watertight:
+        raise ValueError("Target and predicted surfaces must be watertight closed solids")
+    target_sub = _subdivisions(target_points, target_triangles, _positive(sample_spacing_mm, "sample_spacing_mm"))
+    predicted_sub = _subdivisions(predicted_points, predicted_triangles, _positive(sample_spacing_mm, "sample_spacing_mm"))
+    target_samples, target_owner = _sample(target_points, target_triangles, target_sub)
+    predicted_samples, predicted_owner = _sample(predicted_points, predicted_triangles, predicted_sub)
+    if len(target_samples) + len(predicted_samples) > max_samples:
+        raise ValueError("Target comparison exceeds max_samples")
+    target_closest, target_distance, _ = _closest(predicted_points, predicted_triangles, target_samples)
+    predicted_closest, predicted_distance, _ = _closest(target_points, target_triangles, predicted_samples)
+    # contains() is evaluated in chunks to bound memory on real CAD surfaces.
+    target_inside = np.concatenate([predicted_mesh.contains(target_samples[i:i + 4096]) for i in range(0, len(target_samples), 4096)])
+    predicted_inside = np.concatenate([target_mesh.contains(predicted_samples[i:i + 4096]) for i in range(0, len(predicted_samples), 4096)])
+    signed_target = np.where(target_inside, target_distance, -target_distance)
+    signed_predicted = np.where(predicted_inside, -predicted_distance, predicted_distance)
+    face_types = target_face_types or ["Plane"] * len(target_triangles)
+    if len(face_types) != len(target_triangles):
+        raise ValueError("target_face_types must have one type per target triangle")
+    target_region = np.array([str(face_types[index]) == "Plane" for index in target_owner])
+    # Predicted samples inherit the nearest target face's region.
+    _, _, nearest = _closest(target_points, target_triangles, predicted_samples)
+    predicted_region = np.array([str(face_types[index]) == "Plane" for index in nearest])
+    regions = {}
+    for name, mask, limit in (("planar", target_region, planar_limit_mm), ("nonplanar", ~target_region, nonplanar_limit_mm)):
+        values = np.concatenate((signed_target[target_region == (name == "planar")], signed_predicted[predicted_region == (name == "planar")]))
+        if not len(values):
+            regions[name] = {"status": "no_samples", "sample_count": 0, "tolerance_mm": float(limit)}
+            continue
+        regions[name] = {"status": "within_limits" if values.min() >= 0 and values.max() <= limit else "exceeds_limits",
+                         "sample_count": len(values), "tolerance_mm": float(limit),
+                         "min_signed_mm": float(values.min()), "max_signed_mm": float(values.max()),
+                         "undersize_mm": float(min(values.min(), 0)), "oversize_mm": float(max(values.max(), 0))}
+    failed = [name for name, region in regions.items() if region["status"] == "exceeds_limits"]
+    advice = []
+    for name in failed:
+        region = regions[name]
+        if region["undersize_mm"] < 0:
+            advice.append({"region": name, "action": "increase capsule inner clearance or reduce powder-domain restriction",
+                           "reason": f"predicted part is undersize by {abs(region['undersize_mm']):.3f} mm"})
+        if region["oversize_mm"] > region["tolerance_mm"]:
+            advice.append({"region": name, "action": "reduce capsule inner clearance or adjust upstream capsule dimensions",
+                           "reason": f"predicted part exceeds target by {region['oversize_mm']:.3f} mm"})
+    return {"status": "failed" if failed else "passed", "units": "mm", "alignment": "none",
+            "regions": regions, "upstream_regeneration_advice": advice,
+            "warnings": ["Signed surface distances are sampled and do not certify a continuous CAD maximum.",
+                         "The surrogate is uncalibrated; dimensional pass is not engineering acceptance."]}

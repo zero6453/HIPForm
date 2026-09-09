@@ -35,8 +35,9 @@ class DefaultConfigResponse(Settings):
 
 class JobRequest(Settings):
     name: str = Field(default="HIP simulation", min_length=1, max_length=120)
-    cavity_path: Path | None = Field(default=None, description="Absolute STEP path on the API host; initial powder domain")
-    capsule_path: Path | None = Field(default=None, description="Absolute STEP path on the API host; capsule material only")
+    workflow: Literal["auto", "verify", "legacy"] = Field(default="auto", description="verify compares predicted cavity+jobid.step to target cavity.step; auto selects verify for vented capsules")
+    cavity_path: Path | None = Field(default=None, description="Absolute target finished-part cavity.step path on the API host")
+    capsule_path: Path | None = Field(default=None, description="Absolute capsule.step wall and vent path on the API host")
     input_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$",
                                 description="ID returned by POST /api/inputs; replaces both local paths")
     config: SimulationConfig | None = Field(default=None, description="Inline process/material configuration; saved as an immutable job snapshot")
@@ -73,6 +74,7 @@ class JobResponse(Settings):
     started_at: str | None = None
     completed_at: str | None = None
     config_id: str | None = None
+    workflow: Literal["auto", "verify", "legacy"] = "auto"
     config: SimulationConfig
     inputs: dict = Field(default_factory=dict)
     error: JobError | None = None
@@ -179,8 +181,8 @@ def create_app(data_dir: Path | None = None, *, job_timeout_s=3600):
 
     @app.post("/api/inputs", status_code=201, response_model=InputResponse, tags=["Inputs"],
               summary="Upload cavity.step and capsule.step (maximum 100 MiB each)")
-    def upload_inputs(cavity: Annotated[UploadFile, File(description="Initial powder domain STEP")],
-                      capsule: Annotated[UploadFile, File(description="Capsule wall material STEP")]):
+    def upload_inputs(cavity: Annotated[UploadFile, File(description="Target finished-part cavity.step")],
+                      capsule: Annotated[UploadFile, File(description="Capsule wall and vent capsule.step")]):
         try:
             return store.save_inputs({role: (upload.filename or "", upload.file)
                                       for role, upload in {"cavity": cavity, "capsule": capsule}.items()})
@@ -192,7 +194,8 @@ def create_app(data_dir: Path | None = None, *, job_timeout_s=3600):
     @app.post("/api/jobs", status_code=202, response_model=JobResponse, tags=["Simulations"],
               summary="Queue a simulation with STEP inputs and an explicit configuration source",
               description="Provide input_id OR two absolute STEP paths; provide config OR config_id. "
-              "A geometry gap fails the job with code material_gap. An open vent fails with code open_capsule. "
+                  "cavity.step is the finished target; powder is derived from capsule.step and the straight vent is virtually capped. "
+                  "A geometry gap fails the job with code material_gap. "
               "Accepted jobs return immediately; poll status_url. Both successful and failed jobs have report_url.")
     def submit_job(request: Annotated[JobRequest, Body(openapi_examples={
         "local_steps": {"summary": "Local STEP paths with inline process parameters",

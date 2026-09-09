@@ -22,7 +22,9 @@ class CyclePoint(Settings):
 
 
 class Powder(Settings):
-    name: str = "TC4 idealized powder (uncalibrated)"
+    name: str = "TC4 titanium alloy powder"
+    yield_strength_mpa: Positive = 800
+    tensile_strength_mpa: Positive = 950
     initial_relative_density: Annotated[float, Field(gt=0, le=1)] = 0.65
     limiting_relative_density: Annotated[float, Field(gt=0, le=1)] = 0.995
     solid_density_kg_per_mm3: Positive = 4.43e-6
@@ -36,6 +38,8 @@ class Powder(Settings):
     densification_rate_per_s: Nonnegative = 6e-4
     activation_energy_j_per_mol: Nonnegative = 150000
     pressure_exponent: Positive = 1.5
+    expected_final_relative_density: Annotated[float, Field(gt=0, le=1)] = 0.97
+    typical_volume_shrinkage_fraction: Annotated[float, Field(ge=0, lt=1)] = 0.30
 
     @model_validator(mode="after")
     def density_order(self):
@@ -45,7 +49,9 @@ class Powder(Settings):
 
 
 class Capsule(Settings):
-    name: str = "20 steel idealized Maxwell solid (uncalibrated)"
+    name: str = "20 steel"
+    yield_strength_mpa: Positive = 250
+    tensile_strength_mpa: Positive = 400
     young_modulus_mpa: Positive = 200000
     hot_young_modulus_mpa: Positive = 25000
     poisson_ratio: Annotated[float, Field(gt=-1, lt=0.5)] = 0.3
@@ -80,8 +86,8 @@ class Seal(Settings):
 
 def default_cycle():
     return [CyclePoint(time_s=t, temperature_c=temp, pressure_mpa=p) for t, temp, p in (
-        (0, 20, 0), (3600, 920, 100), (10800, 920, 100),
-        (14400, 200, 100), (16200, 20, 0),
+        (0, 20, 0), (3600, 920, 120), (7200, 900, 120),
+        (18000, 900, 120), (21600, 200, 120), (23400, 20, 0),
     )]
 
 

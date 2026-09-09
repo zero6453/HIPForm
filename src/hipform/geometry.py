@@ -352,6 +352,7 @@ def build_mesh(
     capsule_step: Path,
     mesh_size_mm: float = 5.0,
     seal: dict | None = None,
+    allow_open_vent: bool = False,
 ) -> SimulationMesh:
     """Import mm STEP solids and mesh a bonded powder/capsule assembly.
 
@@ -370,7 +371,8 @@ def build_mesh(
             capsule = _apply_seal(capsule, seal)
             capsule_volume = float(gmsh.model.occ.getMass(*capsule))
         overlap = _overlap_volume(powder, capsule)
-        if overlap > max(powder_volume, capsule_volume) * 1e-8:
+        # OCC can report a microscopic sliver where coincident STEP faces meet.
+        if overlap > max(powder_volume, capsule_volume) * 2e-7:
             raise ValueError(f"Powder and capsule overlap by {overlap:.6g} mm^3. Capsule STEP must contain wall material only.")
         distance, *closest_points = gmsh.model.occ.getDistance(*powder, *capsule)
         if not np.isfinite(distance) or distance < 0:
@@ -388,7 +390,7 @@ def build_mesh(
                 raise ValueError("Powder and capsule could not be resolved into disjoint material volumes.")
             if {tag for dim, tag in fragments if dim == 3} != powder_volumes | capsule_volumes:
                 raise ValueError("Boolean fragmentation produced unassigned solid volumes.")
-            sealed_vent_voids = _check_cad_interface(powder_volumes, capsule_volumes)
+            sealed_vent_voids = [] if allow_open_vent else _check_cad_interface(powder_volumes, capsule_volumes)
             for name, volumes, physical_id in (("powder", powder_volumes, 1), ("capsule", capsule_volumes, 2)):
                 gmsh.model.addPhysicalGroup(3, sorted(volumes), physical_id)
                 gmsh.model.setPhysicalName(3, physical_id, name)
@@ -423,7 +425,7 @@ def build_mesh(
         if volumes[outer_index] <= 0 or any(volume > 1e-7 for index, volume in enumerate(volumes) if index != outer_index):
             raise ValueError("A unique enclosing pressure exterior could not be identified.")
         outer = components[outer_index]
-        if np.any(material[owners[outer]] == 0):
+        if np.any(material[owners[outer]] == 0) and not allow_open_vent:
             raise GeometryError(_OPEN_CAPSULE_MESSAGE, code="open_capsule")
         powder_triangles, _, _, _, _ = _facets(points, tetrahedra[material == 0])
         face_map = {}

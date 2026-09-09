@@ -213,3 +213,21 @@ P95 和 RMS 使用等样本权重；采样结果与网格相关，不证明连�
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(document, encoding="utf-8")
+
+
+def write_verification_report(output_path, comparison, config, metadata):
+    """Write the independent target-versus-prediction verification summary."""
+    status = comparison.get("status", "failed")
+    advice = "".join(f"<li>{_escape(item.get('region'))}: {_escape(item.get('action'))} ({_escape(item.get('reason'))})</li>"
+                     for item in comparison.get("upstream_regeneration_advice", []))
+    rows = "".join(f"<tr><td>{_escape(name)}</td><td>{_escape(region.get('status'))}</td>"
+                   f"<td>{_number(region.get('min_signed_mm'))}</td><td>{_number(region.get('max_signed_mm'))}</td>"
+                   f"<td>{_number(region.get('tolerance_mm'))}</td></tr>"
+                   for name, region in comparison.get("regions", {}).items())
+    document = f"<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>HIPForm verification</title>"
+    document += f"<style>body{{font:15px Arial;max-width:960px;margin:32px auto;line-height:1.6}}table{{border-collapse:collapse}}td,th{{padding:8px 14px;border-bottom:1px solid #ddd;text-align:left}}.status{{font-weight:bold;color:{'#166534' if status == 'passed' else '#b91c1c'}}}</style>"
+    document += f"<h1>HIPForm 成品验证</h1><p class='status'>结果：{_escape(status)}</p>"
+    document += "<p>预测 cavity+jobid.step 与目标 cavity.step 在源坐标中比较。负值表示欠尺寸；平面限值 0～10 mm，非平面限值 0～20 mm。</p>"
+    document += f"<table><tr><th>区域</th><th>状态</th><th>最小有符号偏差(mm)</th><th>最大有符号偏差(mm)</th><th>限值(mm)</th></tr>{rows}</table>"
+    document += f"<h2>上游包套再生成建议</h2><ul>{advice or '<li>无需修改</li>'}</ul><h2>模型与输入</h2><pre>{_json({'config': config, 'metadata': metadata, 'comparison': comparison})}</pre></html>"
+    Path(output_path).write_text(document, encoding="utf-8")

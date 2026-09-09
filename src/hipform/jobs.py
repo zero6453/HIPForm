@@ -177,7 +177,7 @@ class JobStore:
                 write_json(folder / "config.json", resolved)
                 job = {"id": job_id, "name": request.name, "status": "queued", "created_at": now(),
                        "updated_at": now(), "config_id": request.config_id, "config": resolved,
-                       "inputs": snapshots, "error": None}
+                       "inputs": snapshots, "workflow": request.workflow, "error": None}
                 self._save(job)
                 self.executor.submit(self._run, job_id)
             except Exception:
@@ -217,6 +217,10 @@ class JobStore:
             path = folder / "run.log" if name == "run.log" else folder / "run" / name
             if not path.is_symlink() and path.is_file():
                 artifacts[name] = path
+        if job["status"] == "completed":
+            for path in (folder / "run").glob("cavity+*.step"):
+                if path.is_file() and not path.is_symlink() and re.fullmatch(r"cavity\+[a-f0-9]{12}\.step", path.name):
+                    artifacts[path.name] = path
         return artifacts
 
     def artifact(self, job_id: str, name: str) -> Path:
@@ -231,7 +235,13 @@ class JobStore:
                 return
             job.update(status="running", started_at=now())
             self._save(job)
-        command = [sys.executable, "-u", "-m", "hipform.worker", "run",
+        # Existing synthetic box capsules have no vent and retain the legacy
+        # initial-powder contract; real HIP capsules with circular vents use
+        # the target-verification workflow.
+        requested_workflow = job.get("workflow", "auto")
+        workflow = ("verify" if b"CIRCLE" in (folder / "inputs" / "capsule.step").read_bytes().upper() else "run") if requested_workflow == "auto" else requested_workflow
+        workflow = "run" if workflow == "legacy" else workflow
+        command = [sys.executable, "-u", "-m", "hipform.worker", workflow,
                    "--cavity", str(folder / "inputs" / "cavity.step"),
                    "--capsule", str(folder / "inputs" / "capsule.step"),
                    "--config", str(folder / "config.json"), "--output", str(folder / "working-run")]

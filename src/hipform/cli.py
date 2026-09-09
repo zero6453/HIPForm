@@ -7,6 +7,7 @@ import json
 import sys
 import time
 from pathlib import Path
+import numpy as np
 
 from .config import load_config, write_default_config
 
@@ -63,8 +64,21 @@ def _run(args):
         _json(output / "config.resolved.json", payload)
         stage = "geometry"
         print("Preparing conformal capsule/powder mesh...", flush=True)
-        mesh = build_mesh(args.cavity, args.capsule, config.solver.mesh_size_mm,
-                          config.seal.model_dump() if config.seal else None)
+        target = None
+        derived = None
+        if args.command == "verify":
+            from .cad_workflow import derive_powder_domain, mesh_step_surface
+            job_id = args.job_id or hashlib.sha256(f"{time.time_ns()}".encode()).hexdigest()[:12]
+            derived = derive_powder_domain(args.capsule, output / f"derived-cavity-{job_id}.step",
+                                           output / f"sealed-capsule-{job_id}.step")
+            target = mesh_step_surface(args.cavity, config.solver.mesh_size_mm)
+            powder_path, capsule_path = derived["powder_step"], derived["sealed_capsule_step"]
+            seal = None
+        else:
+            powder_path, capsule_path = args.cavity, args.capsule
+            seal = config.seal.model_dump() if config.seal else None
+        mesh = build_mesh(powder_path, capsule_path, config.solver.mesh_size_mm,
+                          seal)
         _save_mesh(output, mesh)
         print(f"Mesh: {len(mesh.points)} nodes, {len(mesh.tetrahedra)} tetrahedra", flush=True)
         if args.command == "mesh":
@@ -88,6 +102,28 @@ def _run(args):
         _export_result(output, mesh, result)
         stage = "comparison"
         tolerance = config.tolerances
+        if args.command == "verify":
+            from .cad_workflow import export_faceted_step
+            from .comparison import compare_target_surfaces
+            from .report import write_verification_report
+            predicted_step = output / f"cavity+{job_id}.step"
+            predicted_nodes, inverse = np.unique(mesh.powder_triangles, return_inverse=True)
+            export_faceted_step((mesh.points + result.displacement)[predicted_nodes], inverse.reshape(-1, 3), predicted_step)
+            comparison = compare_target_surfaces(target[0], target[1],
+                (mesh.points + result.displacement)[predicted_nodes], inverse.reshape(-1, 3), target[2],
+                sample_spacing_mm=max(tolerance.sample_spacing_mm, config.solver.mesh_size_mm), max_samples=tolerance.max_samples,
+                planar_limit_mm=10, nonplanar_limit_mm=20)
+            _json(output / "comparison.json", comparison)
+            write_verification_report(output / "report.html", comparison, payload, {"derived": derived, "target": str(args.cavity), "predicted_step": predicted_step.name})
+            summary = {"execution_status": "completed", "validation_status": comparison["status"],
+                       "engineering_acceptance": "not_assessed", "comparison_basis": "predicted cavity+jobid.step versus target cavity.step",
+                       "predicted_step": predicted_step.name, "upstream_regeneration_advice": comparison["upstream_regeneration_advice"],
+                       "geometry": mesh.metadata, "elapsed_s": round(time.monotonic()-started, 2), "warnings": result.warnings + comparison["warnings"]}
+            _json(output / "result.json", summary)
+            print(f"Report: {output / 'report.html'}")
+            print(f"Predicted STEP: {predicted_step}")
+            print(f"Validation: {comparison['status']}")
+            return 0
         comparison = compare_surfaces(mesh.points, mesh.points + result.displacement,
             mesh.powder_triangles, mesh.powder_face_ids, flat_mm=tolerance.flat_mm,
             angular_mm=tolerance.angular_mm, angular_face_ids=tolerance.angular_face_ids,
@@ -140,12 +176,14 @@ def main(argv=None) -> int:
     example.add_argument("--cavity", type=Path, required=True)
     example.add_argument("--output", type=Path, required=True)
     example.add_argument("--wall-mm", type=float, default=3.0)
-    for name in ("mesh", "run"):
+    for name in ("mesh", "run", "verify"):
         command = commands.add_parser(name)
         command.add_argument("--cavity", type=Path, required=True)
         command.add_argument("--capsule", type=Path, required=True)
         command.add_argument("--config", type=Path)
         command.add_argument("--output", type=Path, required=True)
+        if name == "verify":
+            command.add_argument("--job-id", help="Stable identifier used in cavity+<jobid>.step")
     args = parser.parse_args(argv)
     try:
         if args.command == "serve":
