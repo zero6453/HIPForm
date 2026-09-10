@@ -8,6 +8,8 @@ HIPForm 直接读取工作目录中的 `cavity.step`（目标成品）和 `capsu
 
 ## 运行当前两份 STEP
 
+调用远程 ANSYS/MAPDL 服务请使用 [ANSYS 服务接入说明](docs/ansys-service.zh-CN.md) 中的 `scripts/run_ansys.py`。该入口自动读取两份 STEP、提交远程任务并取回结果。当前服务的 `full3d-hip` 为 `smoke` 联调模型，尚不提供真实烧结成型 STEP 或接触间隙判定。下面的 `hipform verify` 和 `/api/jobs` 仍是本地模型入口。
+
 需要 Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。Ubuntu 还需安装 `libglu1-mesa`。
 
 先在 HIPForm 项目目录安装依赖：

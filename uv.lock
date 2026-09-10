@@ -245,6 +245,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "filelock" },
     { name = "gmsh" },
+    { name = "httpx" },
     { name = "meshio" },
     { name = "numpy" },
     { name = "plotly" },
@@ -260,7 +261,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "matplotlib" },
     { name = "pytest" },
 ]
@@ -270,6 +270,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "filelock", specifier = ">=3.15,<4" },
     { name = "gmsh", specifier = ">=4.13,<5" },
+    { name = "httpx", specifier = ">=0.27,<1" },
     { name = "meshio", specifier = ">=5.3,<6" },
     { name = "numpy", specifier = ">=2.0,<3" },
     { name = "plotly", specifier = ">=6,<7" },
@@ -285,7 +286,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.27,<1" },
     { name = "matplotlib", specifier = ">=3.9,<4" },
     { name = "pytest", specifier = ">=8.2,<9" },
 ]
